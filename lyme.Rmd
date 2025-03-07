@@ -1,0 +1,2544 @@
+---
+title: "lyme"
+output:
+  html_document:
+    df_print: paged
+  # html_notebook: default
+  # pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  library(Seurat),
+  library(tidyverse),
+  library(gghighlight),
+  library(datapasta),
+  library(openxlsx),
+  # library(GEOquery),
+  # library(archive),
+  library(DropletUtils),
+  # library(scuttle),
+  
+  library(org.Hs.eg.db),
+  
+  # library(tensorflow), # need to install tensorflow R package first
+  # then run tensorflow::install_tensorflow(extra_packages='tensorflow-probability') 
+  # library(cellassign), # then install cellassign from github: https://github.com/irrationone/cellassign
+  
+  # automated cell type annotation ('label transfer') using reference data,
+  # library(SingleR),
+  
+  # a large collection of reference expression datasets with curated cell type labels for use with SingleR
+  # library(celldex),
+  
+  # quality control and visualization for scRNA-seq data of object class SingleCellExperiment
+  # library(scater),
+  library(DESeq2),
+  library(officer),
+  library(patchwork),
+  library(camcorder),
+  library(conflicted)
+)
+
+# library(extrafont) 
+# loadfonts(device = "win")
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("slice", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflicts_prefer(dplyr::desc)
+
+# Set a global theme and base size
+theme_set(
+  theme_minimal()
+)
+```
+
+```{r import, eval=FALSE, include=FALSE}
+# the barcodes.tsv, features.tsv, matrix.mtx files for each the 12 samples are stored in  12 identically named folders, all called "filtered_feature_bc_matrix"
+
+cellranger_folders <- list.dirs("D:/cellranger3", # lists all folders in the disk
+          recursive = TRUE, 
+          full.names = TRUE) |> 
+  str_subset("filtered_feature_bc_matrix") # only "filtered_feature_bc_matrix" folders
+
+cellranger_folders[12] |> walk( ~ read10xCounts(samples = .) |> # produces an sce object
+                             saveRDS(file = paste0( # saves object to disk
+                               "./output/sce/", # folder where to save object
+                               str_extract(.,"L.*_T\\d"), # saved object name
+                               ".sce.rds") # object extension
+                               )
+                           )
+
+# equivalent procedure from seurat that reads in the three-in-one hdf5 files
+# list.files("D:/cellranger3", # list of hdf5 files
+#            recursive = TRUE, 
+#            full.names = TRUE, 
+#            pattern = "filtered_feature_bc_matrix.h5") |> 
+#   walk(~ Read10X_h5(filename = .) |> # seurat function for reading in files
+#                             saveRDS(file = paste0(
+#                               "./output/seurat/",
+#                               str_extract(.,"L.*_T\\d"),
+#                               ".seurat.rds")
+#                                     )
+#                           )
+```
+
+```{r qc, eval=FALSE, include=FALSE}
+sce_files <- list.files("./output/sce/", 
+           full.names = TRUE) 
+
+is.mito <- sce_files[1] |>
+  readRDS() |> rowData() |> base::as.data.frame() |> pull(Symbol) |> str_which("^MT-")
+
+sce_files |> walk( ~
+  readRDS(file = .) |> 
+  quickPerCellQC(subsets=list(Mito=is.mito), sub.fields="subsets_Mito_percent") |> 
+  as.Seurat(data = NULL) |> 
+  assign(x = paste0(str_extract(., "L.*_T\\d"), ".seurat"), envir = .GlobalEnv)
+  )
+```
+
+```{r integration, eval=FALSE, include=FALSE}
+# normalize and identify variable features for each dataset independently
+ls() |> str_subset("seurat$") |> 
+  map(~
+        get(.) |>
+        NormalizeData() |>
+        FindVariableFeatures() 
+      ) -> seurat.list
+
+rm(list = base::setdiff(ls(), "seurat.list"))
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = seurat.list)
+
+# # run PCA on each object in the list using features obtained in the previous step, 
+# # only required for running the reciprocal PCA workflow
+# seurat.list <- seurat.list |> map(~
+#         ScaleData(object = ., features = features) |>
+#         RunPCA(features = features) 
+#       )
+
+# this function is also applied in the cca workflow but without the commented upon args
+anchors <- FindIntegrationAnchors(
+  object.list = seurat.list, 
+  # reduction = "rpca", # determines whether to use cca or rpca method for integration
+  # reference = c(1,8),  # determines whether to use reference samples for integration
+  anchor.features = features)
+
+# this command creates an 'integrated' data assay
+seurat.integrated <- IntegrateData(anchorset = anchors)
+
+saveRDS(object = seurat.integrated, file = "./output/seurat.integrated.rds")
+```
+
+```{r merging, eval=FALSE, include=FALSE}
+seurat.merged <- merge(
+  x = L204127_T1.seurat, 
+  y = c(L204127_T4.seurat, L204185_T1.seurat, L204185_T4.seurat, L205994_T1.seurat,
+        L205994_T4.seurat, L206002_T1.seurat, L206002_T4.seurat, L211932_T1.seurat,
+        L214612_T1.seurat, L218247_T1.seurat, L219519_T1.seurat), 
+  add.cell.ids = c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4", "L205994_T1",
+                   "L205994_T4", "L206002_T1", "L206002_T4", "L211932_T1", "L214612_T1",
+                   "L218247_T1", "L219519_T1")
+  )
+
+sce.merged <- as.SingleCellExperiment(seurat.merged)
+
+rm(list = base::setdiff(ls(), "sce.merged"))
+```
+
+```{r metadata, eval=FALSE, include=FALSE}
+# load Seurat object
+seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+
+# load object with participant metadata
+participants <- read_csv("data/sampleData.csv", 
+                       col_types = cols(...1 = col_skip())
+                       )
+
+# ensure that both objects have the "sample" column with identical sample names
+seurat.integrated@meta.data <- seurat.integrated@meta.data |> 
+  mutate(sample = str_extract(Sample, "L.*_T\\d"))
+
+participants <- participants |> mutate(sample = paste0("L",
+                                      Subject_ID, 
+                                      "_",
+                                      str_extract(sample, "T\\d.*")
+                                      )
+                      )
+
+# remove unused samples from participants object
+participants <- participants |> filter(sample %in% dplyr::intersect(participants$sample, seurat.integrated@meta.data$sample))
+
+# write as csv files 
+write.xlsx(participants, file = "./data/sc_sampleData.csv", sheetName = "sc", colNames = TRUE)
+
+# # merge participants object with Seurat object
+# seurat.integrated@meta.data <- seurat.integrated@meta.data |> rownames_to_column() |>
+#   left_join(participants, by = "sample") |> column_to_rownames("rowname")
+# 
+# saveRDS(object = seurat.integrated, file = "./output/seurat.integrated.rds")
+```
+
+```{r annotation, eval=FALSE, include=FALSE}
+# Download the reference data sets -----------------------
+# # 1561 bulk RNA-seq samples of sorted immune cell populations
+# # 5 major and 15 minor cell types
+# # https://rdrr.io/github/LTLA/celldex/man/DatabaseImmuneCellExpressionData.html
+# DICE.data <- DatabaseImmuneCellExpressionData(ensembl = TRUE)
+# 
+# # 211 bulk human microarray samples of sorted hematopoietic cell populations from GSE24759
+# # 16 major and 38 minor cell types
+# # https://rdrr.io/github/LTLA/CellTypeReferences/man/NovershternHematopoieticData.html
+# Hemato.data <- NovershternHematopoieticData(ensembl = TRUE)
+# 
+# # 259 RNA-seq samples of pure stroma and immune cells by Blueprint and ENCODE
+# # 24 major and 43 minor cell types
+# # https://rdrr.io/github/LTLA/CellTypeReferences/man/BlueprintEncodeData.html
+# ENCODE.data <- BlueprintEncodeData(ensembl = TRUE) 
+# 
+# # 713 microarray samples from the Human Primary Cell Atlas (HPCA) (Mabbott et al., 2013).
+# # 37 major and 157 minor cell types
+# # https://rdrr.io/github/LTLA/CellTypeReferences/man/HumanPrimaryCellAtlasData.html
+# HPCA.data <- HumanPrimaryCellAtlasData(ensembl = TRUE) 
+
+# 114 bulk RNA-seq samples of sorted immune cell populations that can be found in GSE107011
+# 10 major and 29 minor cell types
+# https://rdrr.io/github/LTLA/CellTypeReferences/man/MonacoImmuneData.html
+# Monaco.data <- MonacoImmuneData(ensembl = TRUE) 
+
+# saveRDS(DICE.data, file="./output/reference sets/DICE.data.rds")
+# saveRDS(Monaco.data, file="./output/reference sets/Monaco.data.rds")
+
+# explanation for the argument "assay.type.test = 1" is at the following link
+# http://bioconductor.org/books/release/SingleRBook/using-the-classic-mode.html#choices-of-assay-data
+
+# Make predictions using the reference data sets -----------------------
+# Gross predictions from Monaco.data
+# predictions_monaco_m <- SingleR(test = sce.merged, assay.type.test = 1, 
+#                        ref = Monaco.data, labels = Monaco.data$label.main)
+
+# Finer predictions from Monaco.data
+predictions_monaco_f <- SingleR(test = sce.merged, assay.type.test = 1, 
+                       ref = Monaco.data, labels = Monaco.data$label.fine)
+
+# Gross predictions from DICE.data
+predictions_dice_m <- SingleR(test = sce.merged, assay.type.test = 1, 
+                       ref = DICE.data, labels = DICE.data$label.main)
+
+# Finer predictions from DICE.data
+# predictions_dice_f <- SingleR(test = sce.merged, assay.type.test = 1, 
+#                        ref = DICE.data, labels = DICE.data$label.fine)
+
+# plotScoreHeatmap(predictions_monaco_f)
+```
+
+```{r clustering, eval=FALSE, include=FALSE}
+seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+
+# removing cells with fewer than 500 detected genes otherwise the FindNeighbors step fails because of matirx sparsity
+seurat.integrated2 <- subset(seurat.integrated, nFeature_originalexp > 500)
+
+# removing the same cells from the labeling objects too
+# predictions_dice_m <- readRDS("~/lyme/output/reference sets/predictions_dice_m.rds")
+# 
+# rownames(predictions_dice_m) <- seurat.integrated |> colnames() # needed for next step
+# 
+# predictions_dice_m <- predictions_dice_m[
+#   rownames(predictions_dice_m) %in% colnames(seurat.integrated2), 
+#   ]
+
+predictions_monaco_f <- readRDS("~/lyme/output/reference sets/predictions_monaco_f.rds")
+
+rownames(predictions_monaco_f) <- seurat.integrated |> colnames() # needed for next step
+
+predictions_monaco_f <- predictions_monaco_f[
+  rownames(predictions_monaco_f) %in% colnames(seurat.integrated2), 
+  ]
+
+# add cell type annotations
+# seurat.integrated2@meta.data$cell_type_coarse <- predictions_monaco_m$labels
+seurat.integrated2@meta.data$cell_type_fine <- predictions_monaco_f$labels
+
+rm(list = base::setdiff(ls(), c("seurat.integrated2", "predictions_monaco_f")))
+
+set.seed(111)
+
+# Run the standard workflow for visualization and clustering
+seurat.integrated2 <- ScaleData(seurat.integrated2, verbose = FALSE)
+seurat.integrated2 <- RunPCA(seurat.integrated2, npcs = 30, verbose = FALSE)
+seurat.integrated2 <- RunUMAP(seurat.integrated2, reduction = "pca", dims = 1:30)
+seurat.integrated2 <- FindNeighbors(seurat.integrated2, dims = 1:30)
+# res_0.05 <- FindClusters(seurat.integrated2, resolution = 0.05) # 10 clusters
+res_0.9 <- FindClusters(seurat.integrated2, resolution = 0.9) # 27 clusters
+
+# Visualization
+# plot_unsupervised <- DimPlot(res_0.9, 
+#                 reduction = "umap", 
+#                 label = TRUE, 
+#                 label.box = TRUE,
+#                 repel = TRUE) + 
+#   theme(legend.position = "none") + 
+#   scale_colour_manual(
+#     values = c("#ac9437", "#6d37cb", "#63c329", "#d441d8", "#5bad44", "#8c61ee", "#b6b730", "#552a91", "#de8f26", "#5a77da", "#e14327", "#5f96cc", "#bd6131", "#b560d3", "#56a360", "#ce50b7", "#53a58d", "#c84593", "#918b49", "#856dbd", "#595632", "#b988c6", "#c04347", "#5e90a8", "#c7456c", "#553669", "#b7795d", "#a8677d")
+#     ) +
+#   ggtitle("Unsupervised clustering  of PBMCs from Lyme participants")
+
+# res_0.9@meta.data$cell_type_coarse <- predictions_dice_m$labels
+# res_0.9@meta.data$cell_type_fine <- predictions_dice_f$labels
+
+# res_0.9@meta.data$cell_type_coarse <- predictions_monaco_m$labels
+res_0.9@meta.data$cell_type_fine <- predictions_monaco_f$labels
+
+# plot_supervised_coarse <- DimPlot(res_0.9, 
+#                                   reduction = "umap",
+#                                   label = TRUE,
+#                                   label.box = TRUE,
+#                                   group.by = "cell_type_coarse",
+#                                   repel = TRUE) +
+#   theme(legend.position = "none") +
+#   scale_colour_manual(
+#     values = c("#ac9437", "#6d37cb", "#63c329", "#d441d8", "#5bad44", "#8c61ee", "#b6b730", "#552a91", "#de8f26", "#5a77da", "#e14327", "#5f96cc", "#bd6131", "#b560d3", "#56a360", "#ce50b7", "#53a58d", "#c84593", "#918b49", "#856dbd", "#595632", "#b988c6", "#c04347", "#5e90a8", "#c7456c", "#553669", "#b7795d", "#a8677d")
+#     ) +
+#   ggtitle("Supervised clustering — coarse")
+
+plot_supervised_fine <- DimPlot(res_0.9, 
+                                  reduction = "umap",
+                                  # label = TRUE,
+                                  # label.box = TRUE,
+                                  group.by = "cell_type_fine",
+                                  repel = TRUE) +
+  theme(legend.position = "none") +
+  scale_colour_manual(
+    values = c("#ac9437", "#6d37cb", "#63c329", "#d441d8", "#5bad44", "#8c61ee", "#b6b730", "#552a91", "#de8f26", "#5a77da", "#e14327", "#5f96cc", "#bd6131", "#b560d3", "#56a360", "#ce50b7", "#53a58d", "#c84593", "#918b49", "#856dbd", "#595632", "#b988c6", "#c04347", "#5e90a8", "#c7456c", "#553669", "#b7795d", "#a8677d")
+    ) +
+  ggtitle("Supervised clustering — fine")
+
+# regenerating the fine clustering plot as a small-multiple chart
+
+medians <- plot_supervised_fine |> layer_data(1) |>  
+  base::cbind(res_0.9@meta.data$cell_type_fine) |> 
+  dplyr::rename(cell_type_fine = 11) |> 
+  filter(cell_type_fine != "Low-density basophils") |> group_by(cell_type_fine) |> 
+    summarise(median_x = median(x), median_y = median(y)) |> 
+  mutate(x_triptych = case_when(median_x <0 ~ "left",
+                                median_x > 0 & median_x < 5 ~ "middle",
+                                median_x > 5 ~ "right")
+         )
+
+# reordering the levels by centroids
+# positions_manual <- c(medians |> filter(x_triptych == "left") |> arrange(desc(median_y)) |> pluck("cell_type_fine"),
+#       medians |> filter(x_triptych == "middle") |> arrange(desc(median_y)) |> pluck("cell_type_fine"),
+#       medians |> filter(x_triptych == "right") |> arrange(desc(median_y)) |> pluck("cell_type_fine"))
+
+# reordering the levels manually
+positions_manual <- c("Progenitor cells", "Classical monocytes", "Intermediate monocytes", "Non-classical monocytes", "Myeloid dendritic cells", "Plasmacytoid dendritic cells", "Natural killer cells", "Naive B cells", "Non-switched memory B cells", "Switched memory B cells","Exhausted B cells", "Plasmablasts", "Naive CD4 T cells", "T regulatory cells", "Th1 cells", "Th2 cells", "Th17 cells", "Follicular helper T cells", "Th1/Th17 cells", "Terminal effector CD4 T cells", "Naive CD8 T cells", "Effector memory CD8 T cells", "Central memory CD8 T cells", "Terminal effector CD8 T cells", "MAIT cells", "Non-Vd2 gd T cells", "Vd2 gd T cells")
+
+
+fine_multiple <- plot_supervised_fine |> layer_data(1) |>  
+  base::cbind(res_0.9@meta.data$cell_type_fine) |> 
+  # dplyr::slice(1:1000) |>
+  dplyr::rename(cell_type_fine = 11) |> 
+  filter(cell_type_fine != "Low-density basophils") |> 
+  mutate(group = group |> as.factor(),
+         cell_type_fine = str_replace(cell_type_fine, 
+                                      "Non classical monocytes", 
+                                      "Non-classical monocytes"),
+         cell_type_fine = cell_type_fine |> as.factor() 
+         |> fct_relevel(positions_manual)
+         ) |>
+  ggplot(aes(x, y, color = cell_type_fine)) +
+  geom_point(size = 0.03767612, stroke = 0.5, shape = 19, color = "#e14327") + 
+  gghighlight(use_direct_label = F) + 
+  facet_wrap(~ cell_type_fine, ncol = 4) + 
+  ggthemes::theme_tufte() + 
+  xlab("UMAP 1 \u27f6") +
+  ylab(expression("UMAP 2 \u27f6")) +
+  theme(legend.position = "none",
+        text = element_text( #size=16,  
+                        family = "Arial")
+        )
+
+# umap_plot <- rvg::dml(ggobj = fine_multiple)
+# 
+# read_pptx("template.pptx") |>
+# add_slide(layout = "Horizontal Layout", master = "Office Theme") |>
+# ph_with(value = umap_plot, location = ph_location_label(ph_label = "Chart")) |>
+# print(target = "umap_plot.pptx")
+
+ggsave("fine_multiple.png",
+height = 10.22,
+units = "in",
+dpi = 320,
+device = "png")
+
+# # overlaying participant IDs on clusters
+# plot_participant <- DimPlot(res_0.9, 
+#                         reduction = "umap",
+#                         # label = TRUE,
+#                         label.box = TRUE,
+#                         group.by = "sample",
+#                         repel = TRUE) +
+#   theme(legend.position = "bottom") +
+#   ggtitle("PBMCs from different Lyme participants") 
+
+# # splitting clusters by time points
+# plot_time <- DimPlot(res_0.9, 
+#               reduction = "umap", 
+#               label = TRUE, 
+#               label.box = TRUE,
+#               repel = TRUE, 
+#               split.by = "time") +   
+#   theme(legend.position = "none") + 
+#   ggtitle("PBMCs from Lyme participants at different time points")
+# 
+# # splitting clusters by infection
+# plot_infection <- DimPlot(res_0.9, 
+#               reduction = "umap", 
+#               label = TRUE, 
+#               label.box = TRUE,
+#               repel = TRUE, 
+#               split.by = "infection") +   
+#   theme(legend.position = "none") + 
+#   ggtitle("PBMCs in samples split by their Lyme infection status")
+```
+
+```{r pseudobulk}
+seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+
+# removing cells with fewer than 500 detected genes otherwise the FindNeighbors step fails because of matirx sparsity
+seurat.integrated2 <- subset(seurat.integrated, nFeature_originalexp > 500)
+
+# removing the same cells from the labeling objects too
+predictions_dice_m <- readRDS("~/lyme/output/reference sets/predictions_dice_m.rds")
+
+rownames(predictions_dice_m) <- seurat.integrated |> colnames() # needed for next step
+
+predictions_dice_m <- predictions_dice_m[
+  rownames(predictions_dice_m) %in% colnames(seurat.integrated2),
+  ]
+
+predictions_monaco_f <- readRDS("~/lyme/output/reference sets/predictions_monaco_f.rds")
+
+rownames(predictions_monaco_f) <- seurat.integrated |> colnames() # needed for next step
+
+predictions_monaco_f <- predictions_monaco_f[
+  rownames(predictions_monaco_f) %in% colnames(seurat.integrated2),
+  ]
+
+# add cell type annotations
+# seurat.integrated2@meta.data$cell_type_coarse <- predictions_monaco_m$labels
+seurat.integrated2@meta.data$cell_type_fine <- predictions_monaco_f$labels
+
+# specify that we will perform downstream analysis on the un-integrated data
+DefaultAssay(seurat.integrated2) <- "originalexp"
+
+cts <- AggregateExpression(seurat.integrated2, 
+                           group.by = c("cell_type_fine", "sample"),
+                           slot = "counts",
+                           assays = 'originalexp',
+                           return.seurat = FALSE)
+
+cts <- cts$originalexp
+
+cts <- cts |> as.data.frame()
+
+# transpose
+cts.t <- t(cts)
+
+# convert to data.frame
+cts.t <- as.data.frame(cts.t)
+
+# get values where to split
+splitRows <- gsub('_.*', '', rownames(cts.t))
+
+# split data.frame
+cts.split <- split.data.frame(cts.t,
+                              f = factor(splitRows))
+
+# fix colnames and transpose
+cts.split.modified <- map(.x = cts.split, 
+                          ~ .x |> `rownames<-` (str_replace(rownames(.x), "(.*)_(L\\d+)-(T\\d)", "\\2_\\3")) |> 
+                            t()
+                          )
+
+# rm(list = base::setdiff(ls(), c("cts.split.modified", "seurat.integrated", "seurat.integrated2")))
+
+# saveRDS(cts.split.modified, file="./output/cts.split.modified.rds")
+```
+
+```{r de_condition, eval=FALSE, include=FALSE}
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+# # Dropping empty rows instead of empty cell types
+# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
+# 
+# countData <- countData |> dplyr::select(c(1, 2, L204127_T1, L204185_T1, L211932_T1, L214612_T1, L218247_T1, L219519_T1)) |> drop_na() |>
+# mutate(cell = cell |> as.factor())
+# 
+# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |>   
+#   map(.x = _, ~dplyr::select(.x, -c(1,2)))
+
+# # Dropping empty cell types instead of empty rows
+countData_list <- map(cts.split.modified[-c(7,8)], ~as.data.frame(.x) |>
+dplyr::select(c(L204127_T1, L204185_T1, L211932_T1, L214612_T1, L218247_T1, L219519_T1)))
+
+colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
+
+condition <- vector("list", length = length(countData_list))
+
+for(i in seq_along(condition)){ 
+  condition[[i]] <- DESeqDataSetFromMatrix(countData = countData_list[[i]],
+                                           colData = colData_list[[i]],
+                                           design = ~ as.factor(Condition) |> relevel("Control", "Patient")
+  )
+  # run DESeq2
+  condition[[i]] <- DESeq(condition[[i]])
+  # Generate results object
+  condition[[i]] <- results(condition[[i]])
+  condition[[i]] <- as.data.frame(condition[[i]])
+}
+
+# names(condition) <- countData$cell |> levels()
+names(condition) <- cts.split.modified[-c(7,8)] |> names()
+
+de_condition <- map_dfr(
+  condition, 
+  ~filter(.x, padj < 0.05) |> rownames_to_column(),
+  .id ="cell"
+)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+    ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+  )
+
+de_condition <- de_condition |> 
+  dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")|>
+  dplyr::select(cell, gene, ID, role, padj, 3:7)
+
+# de_condition |> DT::datatable() |>
+#   DT::formatRound(digits =2, columns = 3:8)
+
+#write.xlsx(de_condition, './output/deg/de_condition.xlsx')
+```
+
+```{r de_time}
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+# # Dropping empty rows instead of empty cell types
+# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
+# 
+# countData <- countData |> dplyr::select(c(1, 2, L204127_T1, L204127_T4, L204185_T1, L204185_T4))) |> drop_na() |>
+#   mutate(cell = cell |> as.factor())
+# 
+# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |> 
+# map(.x = _, ~dplyr::select(.x, c(L204127_T1, L204127_T4, L204185_T1, L204185_T4)))
+
+# # Dropping empty cell types instead of empty rows
+countData_list <- map(cts.split.modified[-c(7,8)], ~as.data.frame(.x) |>
+                        dplyr::select(c(L204127_T1, L204127_T4, L204185_T1, L204185_T4))
+                      )
+
+colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
+
+time <- vector("list", length = length(countData_list))
+
+for(i in seq_along(time)){ 
+  time[[i]] <- DESeqDataSetFromMatrix(countData = countData_list[[i]],
+                                           colData = colData_list[[i]],
+                                           design = ~ as.factor(Subject_ID) + 
+                                        (time|> as.factor() |> relevel(ref = "T4"))
+                                      )
+  # run DESeq2
+  time[[i]] <- DESeq(time[[i]])
+}
+
+# names(time) <- countData$cell |> levels()
+names(time) <- cts.split.modified[-c(7,8)] |> names()
+
+de_time <- map_dfr(
+  .x = time,
+  ~ .x |> results() |> as.data.frame() |> # filter(padj < 0.05) |> 
+    rownames_to_column(),
+  .id ="cell"
+)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+      ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+    )
+
+de_time <- de_time |> 
+  dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")|>
+  dplyr::select(cell, gene, ID, role, padj, 3:8)
+
+# # de_time |> DT::datatable() |>
+# #   DT::formatRound(digits =2, columns = 3:8)
+
+# write.xlsx(de_time, './output/deg/de_time.xlsx')
+
+# genes that are DE in two or more cell types
+repeated_genes <- de_time |> 
+  filter(padj <= 0.05) |> 
+  dplyr::count(gene) |> 
+  arrange(desc(n)) |> 
+  filter(n >= 2) |> 
+  pluck("gene")
+
+# combining normalized gene counts with differential expression results
+normalized_values <- map(.x = time, ~ .x |> counts(normalized = TRUE) |> as.data.frame()) |> list_rbind(names_to = "cell") |> rownames_to_column() |> mutate(rowname = rowname |> str_split_i(pattern = "\\.{3}", i =1)) |> dplyr::rename(ID = rowname) 
+
+combined_values <- left_join(de_time |> 
+            unite(cell_id, cell, ID, sep = "_"),
+          normalized_values |> 
+            unite(cell_id, cell, ID, sep = "_"), 
+          by = "cell_id") |> 
+  pivot_longer(cols = 10:13, names_to = "sample") 
+
+# removing genes where even a single sample has a normalized count of zero
+combined_values_wide <- left_join(de_time |>
+            unite(cell_id, cell, ID, sep = "_"),
+          normalized_values |>
+            unite(cell_id, cell, ID, sep = "_"),
+          by = "cell_id") |>
+  separate(col = cell_id, into = c("cell", "ID"), sep = "_") |>
+  filter(if_all(where(is.numeric), ~ .x != 0)) # filter rows where all numeric are non-zero
+
+table_s3 <- combined_values_wide |> filter(padj <= 0.05) |> 
+  rename(
+    ensembl_id = ID,
+    gene_name = gene,
+    gene_function = role,
+    mean_expression = baseMean,
+    log2_fold_change = log2FoldChange,
+    lfc_standard_error = lfcSE,
+    wald_statistic = stat,
+    p_value = pvalue,
+    adjusted_p_value = padj
+  )
+```
+
+```{r de_number_plot}
+# total number of significant genes per cell type
+de_number <- de_time |> 
+  filter(padj <= 0.05) |> 
+  dplyr::count(cell) |> 
+  mutate(developmental_order = # to arrange by developmental order after n
+           case_when(
+             cell == "Classical monocytes" ~ 1,
+             cell == "Intermediate monocytes" ~ 2,
+             cell == "Myeloid dendritic cells" ~ 3,
+             cell == "Natural killer cells" ~ 4,
+             cell == "Naive B cells" ~ 5,
+             cell == "Plasmablasts" ~ 6,
+             cell == "Switched memory B cells" ~ 7,
+             cell == "Naive CD4 T cells" ~ 8,
+             cell == "Th17 cells" ~ 9
+           )
+         ) |> 
+  arrange(desc(n), developmental_order) |> # arranging by n, then developmental order
+  rownames_to_column() |> # passing the doubly-ordered rows through to the next step 
+  mutate(cell = fct_reorder(cell, rev(rowname))) |>
+  ggplot(aes(x = cell, y = n)) +
+    geom_segment(aes(xend = cell, yend = 0)) +
+    geom_point(size = 4, color= "#e14327") +
+    coord_flip() +
+    xlab("") +
+  ylab("Number of differentially expressed genes") +
+  scale_y_continuous(expand = expansion(mult = 0, add = c(0, 2))) +
+    ggthemes::theme_tufte() +
+  theme(text = element_text( #size=16,  
+    family = "Arial"),
+    axis.text = element_text(color = "black"),
+    axis.ticks.y = element_blank())
+  
+pngfile <- fs::path("de_number.png")
+
+ ggsave(
+  pngfile,
+  de_number,
+  device = ragg::agg_png,
+  width = 7.5, height = 2.4, units = "in", 
+  res = 300,
+  scaling = 1.2)
+```
+
+```{r volcano_plot}
+# volcano plot of DEGs in classical monocytes 
+
+# cells that have at least one significant gene after p value adjustment
+significant_cells <- de_time |> 
+  filter(padj <= 0.05) |> 
+  dplyr::count(cell) |> 
+  arrange(desc(n)) |> 
+  pluck("cell")
+
+de_time2 <- de_time |> 
+  dplyr::slice(-61319) |> # the gene CCL3L1 occurs twice since it has two ensembl IDs
+    drop_na() |>
+  mutate(`FDR < 0.05` = (padj <= 0.05) |> as.factor(),
+          p_log = -log10(pvalue)) 
+
+volcano <- de_time2 |> 
+  filter(cell == "Classical monocytes") |>
+  ggplot(aes(x = log2FoldChange, y = p_log, color = `FDR < 0.05`)) + 
+  geom_point() + 
+  ggrepel::geom_text_repel(data = de_time2 |> 
+                             filter(
+                               cell == "Classical monocytes", 
+                               `FDR < 0.05` == TRUE,
+                               gene %in% c(
+                                 "MXD1", "CXCL8", "EREG", "HBEGF", "EREG",
+                                 "SGK1", "ZFP36", "PLAUR", "PPBP", "C5AR1", "PF4"
+                                 )
+                               ),
+                           aes(label = gene), 
+                           color = "black",
+                           max.overlaps = Inf,
+                           family = "Arial") +
+  expand_limits(x = c(-3.5, 3.5)) +
+  scale_x_continuous(
+    breaks = c(-2, 0, 2),
+    sec.axis = sec_axis(
+      trans = ~.,
+      breaks = c(-2.5, 0, 2.5),
+      labels = c("\u27f5 Upregulated at T4", "No change", "Upregulated at T1 \u27f6")
+      )
+    ) +
+  xlab(expression(log[2](fold~change))) +
+  ylab(expression(-log[10]("p-value"))) +
+  scale_color_discrete(name = "FDR", labels = c("> 0.05", "< 0.05")) +
+  theme_minimal() +  
+  theme(
+    text = element_text( #size=16,  
+                        family = "Arial"),
+    axis.text = element_text(color = "black"),
+    legend.position = c(0.10, 0.22),
+    legend.background = element_rect(fill="grey95", color = NA),
+    legend.margin = margin(0,0,0,0)
+  )
+
+pngfile <- fs::path("volcano_plot.png")
+
+ ggsave(
+  pngfile,
+  volcano,
+  device = ragg::agg_png,
+  width = 3.7, height = 2.57, units = "in", res = 300,
+  scaling = 0.9
+  )
+# Editable plot----
+
+# volcano_plot <- rvg::dml(ggobj = volcano)
+# read_pptx("template.pptx") |>
+# add_slide(layout = "Horizontal Layout", master = "Office Theme") |>
+# ph_with(value = volcano_plot, location = ph_location_label(ph_label = "Chart")) |>
+# print(target = "volcano_plot.pptx")
+ 
+# volcano plots faceted by cell type----
+ 
+# de_time2 |>
+#   ggplot(aes(x = log2FoldChange, y = p_log, color = `FDR < 0.05`)) +
+#   geom_point() +
+#   ggrepel::geom_text_repel(data = de_time2 |>
+#                              filter(
+#                                `FDR < 0.05` == TRUE,
+#                                gene %in% c(
+#                                  repeated_genes,
+#                                  # Intermediate monocytes
+#                                  "C1QB",
+#                                  # Naive B cells
+#                                  "TXNIP", "BTG1",
+#                                  # Classical monocytes
+#                                  "MXD1", "CXCL8", "EREG", "HBEGF", "EREG",
+#                                  "SGK1", "ZFP36", "PLAUR", "PPBP", "C5AR1"
+#                                  )
+#                                ),
+#                            aes(label = gene),
+#                            color = "black",
+#                            max.overlaps = Inf) +
+#   facet_wrap(~ cell, ncol = 3, scales = "free_x") +
+#   xlab(expression(log[2](fold~change))) +
+#   ylab(expression(-log[10](italic(p)~value))) +
+#   cowplot::theme_cowplot() +  theme(legend.position = "none")
+```
+
+```{r expression_plot}
+# Network analysis and representation----
+
+# genes that were DE in monocytes were entered in https://string-db.org/
+# from the network put out by the web app, the two hubs with the highest degrees were selected,
+# the expression of a few select genes connected to those hubs was plotted 
+
+# the following genes were selected from the CXCL8 and EGR1 hubs in the network created by monocyte genes
+# CXCL8_subset <- c("CXCL8", "PF4", "PPBP", "EREG", "HBEGF", "PLAUR")
+# EGR1_subset <- c("EGR1", "IER3", "ZFP36", "BTG2", "RGS2", "ATF3",  "NR4A1", "SGK1", "KLF10", "BCL2A1")
+
+# redo the network analysis using the "STRINGdb" package instead of the web app 
+
+# assign pathways to genes----
+pathways <- data.frame(
+                     stringsAsFactors = FALSE,
+                          check.names = FALSE,
+                                 gene = c("PLAUR","HBEGF","EREG",
+                                          "EGR1","SGK1","BCL2A1","PF4","PPBP",
+                                          "ATF3","NR4A1","IER3","KLF10","MXD1",
+                                          "C5AR1","NAMPT","BTG2","RGS2",
+                                          "RIPK2","NFIL3","IL-8","CCL3L1",
+                                          "CCL3L3","IFITM3","STK17B","CXCL8",
+                                          "TMEM170B","RASGEF1B","ZFP36","GPR183"),
+                       Procoagulation = c(1L,1L,0L,0L,0L,0L,1L,1L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+  `Angiogenesis/Endothelial.survival` = c(1L,1L,1L,1L,1L,1L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,1L,0L,0L,
+                                          0L,0L),
+           Integrated.stress.response = c(0L,0L,0L,1L,1L,0L,0L,0L,
+                                          1L,1L,1L,1L,1L,1L,1L,1L,1L,
+                                          1L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L),
+           Transcriptional.repression = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,1L,0L,0L,0L,0L,0L,
+                                          0L,1L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+                     Survival.factors = c(0L,0L,0L,0L,0L,1L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,1L,1L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+  Alternative.macrophage.polarization = c(0L,0L,0L,0L,1L,0L,0L,0L,
+                                          0L,1L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+            Proinflammatory.responses = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L,1L,1L,1L,0L,0L,1L,0L,1L,
+                                          0L,1L),
+               `Interferon-inducible` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,1L,0L,0L,0L,1L,
+                                          0L,0L),
+                            Apoptosis = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,1L,0L,0L,0L,
+                                          1L,0L),
+                  Signal.transduction = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,1L,1L,
+                                          0L,0L),
+                      mRNA.Regulation = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L)
+)
+  
+  
+# replace the 1s in the second to last columns with the column index----
+
+## iterate over second to column
+pathways <- map(.x = 2:ncol(pathways), .f = ~{
+## replace 1 with the column index if the value is 1, otherwise replace with NA
+if_else(pathways[[.x]] == 1, true = .x-1, false = NA)
+  }) %>%
+## bind the gene names column back to the modified data
+bind_cols(pathways[1], .)
+
+## fix column names  
+colnames(pathways) <- c("gene", "Procoagulation", "Angiogenesis/Endothelial survival", "Integrated stress response", "Transcriptional repression", "Survival factors", "Alternative macrophage polarization", "Proinflammatory response", "Interferon-inducible", "Apoptosis", "Signal transduction", "mRNA Regulation")
+
+
+# concatenates the values from the second to the last column----
+pathways <- pathways |> 
+  unite(col = "concatenated", 2:ncol(pathways), sep = ",", remove = FALSE, na.rm = TRUE)
+
+monocytes <- combined_values |>
+  filter(
+    grepl('Classical', cell_id),
+    padj < 0.05
+         ) |>
+  separate(col = cell_id, into = c("cell", "ID"), sep = "_") |>
+  separate(col = sample, into = c("sample", "time"), sep = "_") |>
+  left_join(pathways, by = "gene") |>
+  filter(role != "C-C motif chemokine ligand 3 like 3")
+
+monocytes <- monocytes |> 
+  mutate(
+    gene = gene |>
+      factor(levels =  monocytes |> arrange(concatenated) |>  dplyr::select(gene, concatenated) |> unique() |> pluck("gene")),
+    facet_text = "",
+             )
+
+monocytes$facet_text[seq(from = 4, to = 108, by = 4)] <- monocytes |> 
+  dplyr::slice(seq(from = 4, to = 108, by = 4)) |> pluck("concatenated")
+
+monocytes <- monocytes |> mutate(
+  gene = if_else(gene == "CXCL8", "IL-8", gene),
+  gene = gene |> factor(
+  levels = c("PF4", "PPBP", "HBEGF", "PLAUR", "EREG", "EGR1", "SGK1", "BCL2A1", "IL-8", "ATF3", "IER3", "MXD1", "C5AR1", "RGS2", "KLF10", "NAMPT", "BTG2", "NR4A1", "RIPK2", "ZFP36", "NFIL3", "CCL3L1", "GPR183", "RASGEF1B", "IFITM3", "STK17B", "TMEM170B")
+  )
+  )
+
+p <- monocytes|> 
+  ggplot(aes(x = time, y = log2(value))) +
+  geom_line(aes(x = time, y = log2(value), group = sample), alpha = 0.5) +
+  geom_point(size = 2, fill = "white", shape = 21) +
+  # labs(title = "Differentially expressed genes in classical monocytes",
+  #      tag = "A") +
+  xlab("Time") +
+  ylab(expression(log[2]("Count"))) +
+  ggthemes::theme_tufte() +
+  facet_wrap(~ gene, ncol = 5, scales = "free_y") +
+  geom_text(x = Inf, y = Inf, label = monocytes$facet_text,  vjust = 1.2, hjust = 1, color = "#e14327") +
+   # annotation_custom(grob = legend_grob) +
+  # ggh4x::facet_nested(functional_category ~ gene,
+  #              strip = ggh4x::strip_nested(text_x = list(
+  #                element_text(face = 'bold'),
+  #                element_text()), by_layer_x = TRUE)) +
+ theme(
+       axis.title.x = element_blank(),
+       strip.background = element_rect(
+         color = "lightgray",
+         fill = "lightgray"),
+       text = element_text( #size=16,  
+                        family = "Arial")
+       )
+
+legend_data <- data.frame(v1 = colnames(pathways)[3:13], value = 1:11) |> 
+  dplyr::rename(`Biological process` = 1) |> 
+  mutate(`Biological process` = paste0(1:11, ". ", `Biological process`) |> 
+           fct_reorder(.x = value))
+
+only_legend <- ggplot(legend_data, aes(x = `Biological process`, y = value, color = `Biological process`)) +
+    geom_point(shape = 32) + # Invisible points
+      guides(color = guide_legend(title = "Biological processes", ncol = 2)) +
+    theme_void() + # Remove plot background, grid, and text
+      theme(
+        legend.position = "right",
+        legend.title = element_text(color = "#e14327", family = "Arial"),
+        legend.text = element_text(color = "#e14327", family = "Arial"),
+        legend.key.size = unit(0.5, "cm"), # size of the invisible legend points
+        legend.spacing.y = unit(0.1, "cm") # space below legend title
+        )
+
+ p2 <- p + patchwork::inset_element(only_legend, left = 0.47, bottom = 0.0, 
+                             right = 1, top = 0.15, 
+                             align_to = 'full')
+
+pngfile <- fs::path("monocytes.png")
+
+ ggsave(
+  pngfile,
+  p2,
+  device = ragg::agg_png,
+  width = 7.5, height = 8.13, units = "in", res = 300,
+  scaling = 0.9)
+```
+
+```{r monocyte_expression_pathway}
+# assign pathways to genes----
+pathways <- data.frame(
+                     stringsAsFactors = FALSE,
+                          check.names = FALSE,
+                                 gene = c("PLAUR","HBEGF","EREG",
+                                          "EGR1","SGK1","BCL2A1","PF4","PPBP",
+                                          "ATF3","NR4A1","IER3","KLF10","MXD1",
+                                          "C5AR1","NAMPT","BTG2","RGS2",
+                                          "RIPK2","NFIL3","IL-8","CCL3L1",
+                                          "CCL3L3","IFITM3","STK17B","CXCL8",
+                                          "TMEM170B","RASGEF1B","ZFP36","GPR183"),
+                       Procoagulation = c(1L,1L,0L,0L,0L,0L,1L,1L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+  Angiogenesis = c(1L,1L,1L,1L,1L,1L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,1L,0L,0L,
+                                          0L,0L),
+           `Int. stress response` = c(0L,0L,0L,1L,1L,0L,0L,0L,
+                                          1L,1L,1L,1L,1L,1L,1L,1L,1L,
+                                          1L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L),
+           `Transcription repression` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,1L,0L,0L,0L,0L,0L,
+                                          0L,1L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+                     `Cell survival` = c(0L,0L,0L,0L,0L,1L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,1L,1L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+  `Alt. mac. polarization` = c(0L,0L,0L,0L,1L,0L,0L,0L,
+                                          0L,1L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+            `Proinflammatory` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L,1L,1L,1L,0L,0L,1L,0L,1L,
+                                          0L,1L),
+               `Interferon-inducible` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,1L,0L,0L,0L,1L,
+                                          0L,0L),
+                            Apoptosis = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,1L,0L,0L,0L,
+                                          1L,0L),
+                  `Signal transduction` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,1L,1L,
+                                          0L,0L),
+                      `mRNA regulation` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L)
+)
+  
+# Filter significant genes and ensure distinct entries
+de_time_filtered <- de_time %>%
+  filter(padj < 0.05, cell == "Classical monocytes") %>%
+  slice(-24)
+
+# Sort genes by log2FoldChange
+sorted_genes <- de_time_filtered %>%
+  arrange(log2FoldChange) %>%
+  pull(gene)
+
+# Prepare data for heatmap
+binary_intersection_matrix <- pathways %>%
+  mutate(across(everything(), ~ replace_na(.x, 0))) %>%
+  filter(gene %in% sorted_genes) %>%
+  mutate(gene = factor(gene, levels = sorted_genes)) %>%
+  pivot_longer(cols = -gene, names_to = "pathway", values_to = "membership")
+
+binary_intersection_matrix <- binary_intersection_matrix |> 
+  mutate(pathway = pathway |> factor(levels = 
+      binary_intersection_matrix |> 
+      filter(membership != 0) |> 
+      dplyr::count(pathway) |> 
+      arrange(desc(n)) |> pluck("pathway")
+                                       )
+      )
+
+# Create heatmap
+upset_plot <- 
+  binary_intersection_matrix |> 
+  ggplot(aes(x = pathway, y = gene)) +
+  geom_point(aes(color = factor(membership), shape = factor(membership)), size = 2.5) +
+  scale_color_manual(values = c("0" = "grey90", "1" = "gray10"), guide = "none") +
+  scale_shape_manual(values = c("0" = 20, "1" = 20), guide = "none") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8, color = "black"),
+    axis.text.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  ) 
+
+# Create gene expression plot
+gene_expression_plot <- de_time_filtered %>%
+  mutate(gene = factor(gene, levels = sorted_genes)) %>%
+  ggplot(aes(
+    x = log2FoldChange,
+    y = gene,
+    color = -log10(pvalue),
+    xmin = log2FoldChange - 1.96 * lfcSE,
+    xmax = log2FoldChange + 1.96 * lfcSE
+  )) +
+  geom_point(shape = 19, size = 0.75) +
+  geom_linerange(size = 0.25) +
+ theme(
+    axis.text.y = element_text(size = 6, color = "black"),
+    axis.title.x = element_text(hjust = 0.5, vjust = 36, size = 8),
+    axis.text.x = element_text(size = 8, color = "black"),
+    axis.title.y = element_blank(),
+    axis.line.y = element_blank(), 
+        legend.margin =  margin(0, 0, 0, 0),
+        legend.position = c(0.5, -0.35),
+        legend.direction = "horizontal",
+        legend.title.position = "bottom",
+    legend.title = element_text(hjust = 0.5, vjust = 3, size = 8),
+    plot.margin = margin(0, 5, 0, 0)
+  ) +
+  labs(
+    x = "log2(Fold Change) ± 95% CI",
+    color = "-log10(p-value)"
+  ) +
+geom_segment(x = 0,
+               y = 0,
+               xend = 0,
+               yend = 28,
+               color = "gray") +
+  scale_x_continuous(
+      limits = c(-2.49, 2.49), 
+      expand = c(0, 0),
+      sec.axis = sec_axis(
+      trans = ~.,
+      breaks = c(-1.5, 0, 1.5),
+      labels = c("\u27f5 Up at T4", "No change", "Up at T1 \u27f6")
+      )
+    ) +
+      scale_color_gradient(high = "#132B43", low = "#56B1F7")  # Reverse if using blue shades
+
+# Combine plots
+aligned_plot <- gene_expression_plot + upset_plot
+
+aligned_plot
+
+# Save the plot
+ggsave(
+  filename = "aligned_plot.png",
+  plot = aligned_plot,
+  device =  ragg::agg_png,
+  width = 7,
+  height = 3.5,
+  units = "in",
+  dpi = 600
+  )
+```
+
+```{r expression_specific_genes}
+# PD1_tc----
+PD1_tc <- de_time |> 
+  filter(
+    (cell %in% c("Central memfory CD8 T cells", "Effector memory CD8 T cells", "Follicular helper T cells",
+                 "Naive CD4 T cells", "Naive CD8 T cells", "Non-Vd2 gd T cells", "T regulatory cells",
+                 "Terminal effector CD4 T cells", "Terminal effector CD8 T cells", "Th1 cells", 
+                 "Th1/Th17 cells", "Th17 cells", "Th2 cells", "Vd2 gd T cells") & gene == "PDCD1")
+  ) |> 
+  mutate(`FDR < 0.05` = 
+           case_when(
+             padj <= 0.05 ~ TRUE,
+             TRUE ~ FALSE
+                     )
+         ) |> 
+  ggplot(aes(x = cell, 
+             y=log2FoldChange, 
+             ymin = log2FoldChange-(1.96*lfcSE), 
+             ymax = log2FoldChange+(1.96*lfcSE),
+             color = `FDR < 0.05`
+             )
+         )  +
+  geom_hline(yintercept = 0, color = "darkgray") +
+  geom_pointrange(shape = 20) +
+  scale_y_continuous(limits = c(-11.6, 11.6)) +
+  ylab(expression(log[2](T1/T4))) +
+  theme_minimal() +
+  theme(
+  text = element_text(family = "Arial"),
+  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+  axis.title.x = element_blank(),
+  strip.text.x.bottom = element_text(),
+  strip.text.y.right = element_text(angle = 0),
+  strip.background = element_rect(fill = "lightgray", color = NA),
+  strip.placement = "outside",
+  panel.spacing.x =unit(0.5,"lines"),
+  legend.position = "none") +
+  ggtitle("PD-1 in T cells") +
+    scale_colour_manual(values = RColorBrewer::brewer.pal(n = 7, name = "Dark2"))
+
+# ifng_tc----
+ifng_tc <- de_time |> 
+  filter(cell %in% c("Central memory CD8 T cells", "Effector memory CD8 T cells", "Follicular helper T cells", "Naive CD4 T cells", "Naive CD8 T cells", "Non-Vd2 gd T cells", "T regulatory cells", "Terminal effector CD4 T cells", "Terminal effector CD8 T cells", "Th1 cells", "Th1/Th17 cells", "Th17 cells", "Th2 cells", "Vd2 gd T cells"), gene == "IFNG") |> 
+    mutate(`FDR < 0.05` = 
+           case_when(
+             padj <= 0.05 ~ TRUE,
+             TRUE ~ FALSE
+                     )
+         ) |> 
+  ggplot(aes(x = cell, 
+             y=log2FoldChange, 
+             ymin = log2FoldChange-(1.96*lfcSE), 
+             ymax = log2FoldChange+(1.96*lfcSE),
+             color = `FDR < 0.05`
+             )
+         )  +
+  geom_hline(yintercept = 0, color = "darkgray") +
+  geom_pointrange(shape = 20) +
+  scale_y_continuous(limits = c(-11.6, 11.6)) +
+  ylab(expression(log[2](T1/T4))) +
+  theme_minimal() +
+  theme(
+  text = element_text(family = "Arial"),
+  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+  axis.title.x = element_blank(),
+  strip.text.x.bottom = element_text(),
+  strip.text.y.right = element_text(angle = 0),
+  strip.background = element_rect(fill = "lightgray", color = NA),
+  strip.placement = "outside",
+  panel.spacing.x =unit(0.5,"lines"),
+  legend.position = "none") +
+  ggtitle("IFNG in T cells") +
+    scale_colour_manual(values = RColorBrewer::brewer.pal(n = 7, name = "Dark2"))
+
+# ifng_nk----
+ifng_nk <- de_time |> 
+  filter(cell == "Natural killer cells", gene == "IFNG") |> 
+    mutate(`FDR < 0.05` = 
+           case_when(
+             padj <= 0.05 ~ TRUE,
+             TRUE ~ FALSE
+                     )
+         ) |> 
+  ggplot(aes(x = cell, 
+             y=log2FoldChange, 
+             ymin = log2FoldChange-(1.96*lfcSE), 
+             ymax = log2FoldChange+(1.96*lfcSE),
+             color = `FDR < 0.05`
+             )
+         )  +
+  geom_hline(yintercept = 0, color = "darkgray") +
+  geom_pointrange(shape = 20) +
+  scale_y_continuous(limits = c(-11.6, 11.6)) +
+  ylab(expression(log[2](T1/T4))) +
+  theme_minimal() +
+  theme(
+  text = element_text(family = "Arial"),
+  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+  axis.title.x = element_blank(),
+  strip.text.x.bottom = element_text(),
+  strip.text.y.right = element_text(angle = 0),
+  strip.background = element_rect(fill = "lightgray", color = NA),
+  strip.placement = "outside",
+  panel.spacing.x =unit(0.5,"lines"),
+  legend.position = "none") +
+  ggtitle("IFNG in NK cells") +
+    scale_colour_manual(values = RColorBrewer::brewer.pal(n = 7, name = "Dark2"))
+
+# CCR7_dc----
+CCR7_dc <- de_time |> 
+  filter(cell %in% c("Myeloid dendritic cells", "Plasmacytoid dendritic cells"), gene == "CCR7") |> 
+  mutate(`FDR < 0.05` = 
+           case_when(
+             padj <= 0.05 ~ TRUE,
+             TRUE ~ FALSE
+                     )
+         ) |> 
+  ggplot(aes(x = cell, 
+             y=log2FoldChange, 
+             ymin = log2FoldChange-(1.96*lfcSE), 
+             ymax = log2FoldChange+(1.96*lfcSE),
+             color = `FDR < 0.05`
+             )
+         )  +
+  geom_hline(yintercept = 0, color = "darkgray") +
+  geom_pointrange(shape = 20) +
+  scale_y_continuous(limits = c(-9.05, 9.05)) +
+  ylab(expression(log[2](T1/T4))) +
+  theme_minimal() +
+  theme(
+  text = element_text(family = "Arial"),
+  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+  axis.title.x = element_blank(),
+  strip.text.x.bottom = element_text(),
+  strip.text.y.right = element_text(angle = 0),
+  strip.background = element_rect(fill = "lightgray", color = NA),
+  strip.placement = "outside",
+  panel.spacing.x =unit(0.5,"lines")
+  ) +
+  ggtitle("CCR7 in dendritic cells")+
+    scale_colour_manual(values = RColorBrewer::brewer.pal(n = 7, name = "Dark2"))
+
+# HLA_dc_mono----
+HLA_dc_mono <- de_time |> 
+    filter(cell %in% c("Myeloid dendritic cells", "Plasmacytoid dendritic cells",
+                       "Classical monocytes", "Intermediate monocytes", "Non classical monocytes"), 
+           str_detect(gene, "HLA-DR.*") 
+           )|> 
+  mutate(cell_type = case_when(
+    cell %in% c("Myeloid dendritic cells", "Plasmacytoid dendritic cells") ~ "dendritic cells",
+    TRUE ~ "monocytes")
+    ) |>
+    mutate(`FDR < 0.05` = 
+           case_when(
+             padj <= 0.05 ~ TRUE,
+             TRUE ~ FALSE
+                     )
+         ) |> 
+  ggplot(aes(x = cell, 
+             y=log2FoldChange, 
+             ymin = log2FoldChange-(1.96*lfcSE), 
+             ymax = log2FoldChange+(1.96*lfcSE),
+             color = `FDR < 0.05`
+             )
+         )  +
+  geom_hline(yintercept = 0, color = "darkgray") +
+  geom_pointrange(shape = 20) +
+  ylab(expression(log[2](T1/T4))) +
+  theme_minimal() +
+  theme(
+  text = element_text(family = "Arial"),
+  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+  axis.title.x = element_blank(),
+  strip.text.x.bottom = element_text(),
+  strip.text.y.right = element_text(angle = 0),
+  strip.background = element_rect(fill = "lightgray", color = NA),
+  strip.placement = "outside",
+  panel.spacing.x =unit(0.5,"lines"),
+  legend.position = "none") +
+    facet_grid(gene ~ cell_type, scales = "free") +
+  ggtitle("HLA-DR genes in dendritic cells and monocytes")+
+    scale_colour_manual(values = RColorBrewer::brewer.pal(n = 7, name = "Dark2"))
+
+# plots----
+
+PD1_tc
+ifng_tc
+ifng_nk
+CCR7_dc
+HLA_dc_mono
+
+# # T cells side by side
+# top_row <- PD1_tc + ifng_tc
+# 
+# # Bottom row with dendritic cells plots side by side and smaller space for NK cells plot
+# bottom_row <- CCR7_dc + HLA_dc_mono + ifng_nk 
+# 
+# # Combine rows
+# top_row / bottom_row 
+```
+
+```{r de_control}
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+# # Dropping empty rows instead of empty cell types
+# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
+# 
+# countData <- countData |> dplyr::select(c(1,2,L204127_T4, L204185_T4, L211932_T1, L214612_T1, L218247_T1, L219519_T1)) |> drop_na() |> 
+#   mutate(cell = cell |> as.factor())
+# 
+# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |> 
+# map(.x = ~dplyr::select(.x, L204127_T4, L204185_T4, L211932_T1, L214612_T1, L218247_T1, L219519_T1))
+
+# # Dropping empty cell types instead of empty rows
+countData_list <- map(cts.split.modified[-c(7,8)], ~as.data.frame(.x) |>
+dplyr::select(c(L204127_T4, L204185_T4, L211932_T1, L214612_T1, L218247_T1, L219519_T1)))
+
+colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
+
+control <- vector("list", length = length(countData_list))
+
+for(i in seq_along(control)){ 
+  control[[i]] <- DESeqDataSetFromMatrix(countData = countData_list[[i]],
+                                           colData = colData_list[[i]],
+                                           design = ~ as.factor(Condition) |> relevel("Control", "Patient")
+  )
+  # run DESeq2
+  control[[i]] <- DESeq(control[[i]])
+  # Generate results object
+  control[[i]] <- results(control[[i]])
+  control[[i]] <- as.data.frame(control[[i]])
+}
+
+# names(control) <- countData$cell |> levels()
+names(control) <- cts.split.modified[-c(7,8)] |> names()
+
+de_control <- map_dfr(
+  control, 
+  ~filter(.x, padj < 0.05) |> rownames_to_column(),
+  .id ="cell"
+)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+    ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+  )
+
+de_control <- de_control |> 
+  dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")|>
+  dplyr::select(cell, gene, ID, role, padj, 3:7)
+
+# de_control |> DT::datatable() |>
+#   DT::formatRound(digits =2, columns = 3:8)
+
+write.xlsx(de_control, './output/deg/de_control.xlsx')
+```
+
+```{r de_em}
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+# # Dropping empty rows instead of empty cell types
+# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
+# 
+# countData <- countData |> dplyr::select(c(1,2, L204127_T1, L204185_T1, L205994_T1, L206002_T1)) |> drop_na() |> 
+#   mutate(cell = cell |> as.factor())
+# 
+# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |> map(.x = _, ~dplyr::select(.x, L204127_T1, L204185_T1, L205994_T1, L206002_T1))
+
+# # Dropping empty cell types instead of empty rows
+countData_list <- map(cts.split.modified[-c(5,7,8,18,19,23)], ~as.data.frame(.x) |>
+dplyr::select(c(L204127_T1, L204185_T1, L205994_T1, L206002_T1)))
+
+colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
+
+em <- vector("list", length = length(countData_list))
+
+for(i in seq_along(em)){ 
+  em[[i]] <- DESeqDataSetFromMatrix(countData = countData_list[[i]],
+                                           colData = colData_list[[i]],
+                                           design = ~ as.factor(Erythema_Migrans_) |> relevel("Single", "Multiple")
+  )
+  # run DESeq2
+  em[[i]] <- DESeq(em[[i]])
+  # Generate results object
+  em[[i]] <- results(em[[i]])
+  em[[i]] <- as.data.frame(em[[i]])
+}
+
+# names(em) <- countData$cell |> levels()
+names(em) <- cts.split.modified[-c(5,7,8,18,19,23)] |> names()
+
+de_em <- map_dfr(
+  em, 
+  ~filter(.x, padj < 0.05) |> rownames_to_column(),
+  .id ="cell"
+)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+    ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+  )
+
+de_em <- de_em |> 
+  dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")|>
+  dplyr::select(cell, gene, ID, role, padj, 3:7)
+
+# de_em |> DT::datatable() |>
+#   DT::formatRound(digits =2, columns = 3:8)
+
+write.xlsx(de_em, './output/deg/de_em.xlsx')
+```
+
+```{r de_health}
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+# create a new factor that separates uninfected or recovered samples from infected samples
+participants <- participants |> 
+  mutate(health = case_when(Condition == "Patient" & time == "T1" ~ "diseased", 
+                            TRUE ~ "undiseased") |> as.factor() |> relevel(ref = "undiseased")
+         )
+
+# # Dropping empty rows instead of empty cell types
+# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
+# 
+# countData <- countData |> dplyr::select(c(1, 2, L204127_T1, L204127_T4, L204185_T1, L204185_T4, L211932_T1, L214612_T1, L218247_T1, L219519_T1)) |> drop_na() |>
+#   mutate(cell = cell |> as.factor())
+# 
+# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |> 
+# map(.x = _, ~dplyr::select(.x, c(L204127_T1, L204127_T4, L204185_T1, L204185_T4, L211932_T1, L214612_T1, L218247_T1, L219519_T1)))
+
+# # Dropping empty cell types instead of empty rows
+countData_list <- map(cts.split.modified[-c(7,8)], ~as.data.frame(.x) |>
+                        dplyr::select(c(L204127_T1, L204127_T4, L204185_T1, L204185_T4, L211932_T1, L214612_T1, L218247_T1, L219519_T1))
+                      )
+
+colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
+
+health <- vector("list", length = length(countData_list))
+
+for(i in seq_along(health)){ 
+  health[[i]] <- DESeqDataSetFromMatrix(countData = countData_list[[i]],
+                                           colData = colData_list[[i]],
+                                           design = ~ as.factor(Subject_ID) + health
+                                      )
+  # run DESeq2
+  health[[i]] <- DESeq(health[[i]])
+  # Generate results object
+  health[[i]] <- results(health[[i]])
+  health[[i]] <- as.data.frame(health[[i]])
+}
+
+# names(health) <- countData$cell |> levels()
+names(health) <- cts.split.modified[-c(7,8)] |> names()
+
+de_health <- map_dfr(
+  .x = health, 
+  ~filter(.x, padj < 0.05) |> rownames_to_column(),
+  .id ="cell"
+)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+    ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+  )
+
+de_health <- de_health |> 
+dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")|>
+  dplyr::select(cell, gene, ID, role, 3:8) # |> mutate(
+    # across(5:8, ~ format.pval(.x, nsmall = 2, # how many to display after decimal
+    #                           digits = 2)), # how many to use for rounding off
+    # across(9:10, ~ format(.x , scientific = TRUE)) # needs Regex
+    # )
+
+write.xlsx(de_health, './output/deg/de_health.xlsx')
+
+#comparison with paired analysis
+# de_health |> unite(col = hit, 1:2) |> pull(1) |> dplyr::intersect(de_time |> unite(col = hit, 1:2) |> pull(1))
+```
+
+```{r phistograms}
+seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+
+# specify that we will perform downstream analysis on the un-integrated data
+DefaultAssay(seurat.integrated) <- "originalexp"
+
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+cts <- AggregateExpression(seurat.integrated, 
+                           group.by = "sample",
+                           slot = "counts",
+                           assays = 'originalexp',
+                           return.seurat = FALSE)
+
+cts <- cts$originalexp
+
+cts <- cts |> as.data.frame()
+
+count_data <- cts |>
+# dplyr::select(c(L204127_T1, L204185_T1, L211932_T1, L214612_T1, L218247_T1, L219519_T1))
+dplyr::select(c(L204127_T1, L204127_T4, L204185_T1, L204185_T4))
+
+col_data <- filter(participants, sample %in% colnames(count_data))
+
+
+condition <- DESeqDataSetFromMatrix(countData = count_data,
+                                    colData = col_data,
+                                    # design = ~ as.factor(Condition) |> relevel("Control", "Patient")
+                                    design = ~ as.factor(Subject_ID) + (as.factor(time) |> relevel("T1", "T4"))
+                                    )
+
+# run DESeq2
+condition <- DESeq(condition)
+# Generate results object
+condition <- results(condition)
+condition <- as.data.frame(condition)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+    ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+  )
+
+condition |> rownames_to_column() |> 
+  dplyr::rename(
+    ID = rowname,
+    baseline = baseMean,
+    log2fc= log2FoldChange,
+    SE = lfcSE
+  ) |> left_join(genes, by = "ID") |> pull(pvalue) |> hist()
+
+# de_condition |> DT::datatable() |>
+#   DT::formatRound(digits =2, columns = 3:8)
+```
+
+```{r abundance_condition_fisher}
+Control_total <- seurat.integrated2@meta.data |> 
+  filter(sample %in% 
+           c("L204127_T1", "L204185_T1", "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(Condition, cell_type_fine) |> filter(Condition == "Control") |> pull(n) |> sum()
+
+Patient_total <- seurat.integrated2@meta.data |> 
+  filter(sample %in% 
+           c("L204127_T1", "L204185_T1", "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(Condition, cell_type_fine) |> filter(Condition == "Patient") |> pull(n) |> sum()
+
+cell_number_condition <- seurat.integrated2@meta.data |> 
+  filter(sample %in% 
+           c("L204127_T1", "L204185_T1", "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(Condition, cell_type_fine) |> pull(n)
+
+cell_type_condition <- seurat.integrated2@meta.data |> 
+  filter(sample %in% 
+           c("L204127_T1", "L204185_T1", "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(Condition, cell_type_fine) |> pull(cell_type_fine)
+ 
+results_condition <- map_dfr(
+  .x = 1:28, 
+  .id = "cell",
+  ~matrix(data = c(cell_number_condition[.x+28], 
+                   Patient_total-cell_number_condition[.x+28],
+                   cell_number_condition[.x], 
+                   Control_total-cell_number_condition[.x]),
+          nrow = 2, 
+          byrow = T) |> fisher.test() |> broom::glance()
+     )
+
+results_condition$cell <- cell_type_condition[1:28]
+ 
+results_condition |> 
+  DT::datatable() |> 
+  DT::formatRound(digits =2, columns = c(2,4,5))
+```
+
+```{r abundance_time_fisher}
+t4_total <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::count(time, cell_type_fine) |> filter(time == "T4") |> pull(n) |> sum()
+
+t1_total <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::count(time, cell_type_fine) |> filter(time == "T1") |> pull(n) |> sum()
+
+cell_number_time <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::count(time, cell_type_fine) |> pull(n)
+
+cell_type_time <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::count(time, cell_type_fine) |> pull(cell_type_fine)
+ 
+results_time <- map_dfr(
+  .x = 1:28, 
+  .id = "cell",
+  ~ matrix(data = c(cell_number_time[.x], 
+                    t1_total-cell_number_time[.x],
+                    cell_number_time[.x+28],
+                    t4_total-cell_number_time[.x+28]),
+           nrow = 2,
+           byrow = T) |> fisher.test() |> broom::glance()
+     )
+
+results_time$cell <- cell_type_time[1:28]
+ 
+results_time |> #mutate(p.value = format(p.value, scientific = TRUE)) |> 
+  DT::datatable() |> 
+  DT::formatRound(digits =2, columns = c(2,4,5))
+ 
+results_time |> 
+  flextable::flextable() |> 
+  flextable::save_as_pptx(path = './output/deg/number_time_4n.pptx')
+ 
+results_time2 <- results_time |>
+  mutate(Abundance = case_when(estimate >= 1 ~ "More abundant", TRUE ~ "Less abundant") |>
+           as.factor() |> relevel( "More abundant", "Less abundant")) |>
+  mutate(cell = cell |>
+           str_replace(pattern = "Non-switched memory B cells", 
+                                   replacement = "NSM B Cells"),
+         cell = cell |>
+           str_replace(pattern = "Terminal effector CD4 T cells", 
+                                   replacement = "TE CD4 T Cells")) |> 
+  mutate(effect_size = case_when(estimate > 1 ~ conf.low-1,
+                                 estimate < 1 ~ conf.high-1)) |> 
+  mutate(cell = fct_reorder(cell,effect_size),
+          `FDR < 0.05` = p.adjust(p.value, "fdr") <= 0.05) |>
+  filter(round(p.value, 2) < 0.05) 
+
+p <- results_time2 |> 
+  ggplot(aes(y=cell, x=estimate, xmin=conf.low, xmax=conf.high, color = `FDR < 0.05`)) +
+  geom_pointrange(shape = 20) +
+  geom_segment(x = 1,
+               y = 0.0,
+               xend = 1,
+               yend = 13,
+               color = "gray") +
+  expand_limits(x = c(-0.6, 2.6), y = c(0, 13)) +
+  xlab("Odds ratio ± 95% CI") +
+  ylab("Cell type") +
+  scale_color_discrete(name = "FDR", labels = c("> 0.05", "< 0.05")) +
+  scale_x_continuous(
+    breaks = c(0, 1, 2),
+    sec.axis = sec_axis(
+      trans = ~.,
+      breaks = c(0, 1, 2),
+      labels = c("\u27f5 Less abundant at T1", "No change", "More abundant at T1 \u27f6")
+      )
+    ) +
+  geom_text(data = results_time2 |> 
+              filter(estimate >= 1),
+            aes(label = cell, x = conf.high),
+            color = "black",
+            hjust = - 0.1,
+            family = "Arial") +
+  geom_text(data = results_time2 |>
+              filter(estimate <= 1),
+            aes(label = cell, x = conf.low),
+            color = "black",
+            hjust = 1.1,
+            family = "Arial") +
+  ggthemes::theme_tufte() + 
+  theme(
+    text = element_text( #size=16,  
+                        family = "Arial"),
+    axis.text = element_text(color = "black", 
+                             size = 11), # default size of tick labels is 9
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_line(color = "grey"),
+    legend.position = c(0.90, 0.1),
+    axis.line.x.bottom = element_line(color = "grey")
+    )
+
+pngfile <- fs::path("forest_plot.png")
+
+ ggsave(
+  pngfile,
+  p,
+  device = ragg::agg_png,
+  width = 3.55, height = 2.46, units = "in", res = 300,
+  scaling = 0.7
+)
+
+# forest_plot <- rvg::dml(ggobj = p)
+# 
+# read_pptx("template.pptx") |>
+# add_slide(layout = "Horizontal Layout", master = "Office Theme") |>
+# ph_with(value = forest_plot, location = ph_location_label(ph_label = "Chart")) |>
+# print(target = "forest_plot.pptx")
+
+```
+
+```{r abundance_health_fisher}
+seurat.integrated2@meta.data <- seurat.integrated2@meta.data |> 
+  mutate(health = case_when(Condition == "Patient" & time == "T1" ~ "diseased", 
+                            TRUE ~ "undiseased") |> as.factor() |> relevel(ref = "undiseased")
+         )
+
+undiseased_total <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4", 
+                       "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(health, cell_type_fine) |> filter(health == "undiseased") |> pull(n) |> sum()
+
+diseased_total <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4", 
+                       "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(health, cell_type_fine) |> filter(health == "diseased") |> pull(n) |> sum()
+
+cell_number_health <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4", 
+                       "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(health, cell_type_fine) |> pull(n)
+
+cell_type_health <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4", 
+                       "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(health, cell_type_fine) |> pull(cell_type_fine)
+ 
+results_health <- map_dfr(
+  .x = 1:28, 
+  .id = "cell",
+  ~ matrix(data = c(cell_number_health[.x], 
+                    diseased_total-cell_number_health[.x], 
+                    cell_number_health[.x+28], 
+                    undiseased_total-cell_number_health[.x+28]),
+           nrow = 2, 
+           byrow = T) |> fisher.test() |> broom::glance()
+     )
+
+results_health$cell <- cell_type_health[1:28]
+ 
+results_health |> #mutate(p.value = format(p.value, scientific = TRUE)) |> 
+  DT::datatable() |> 
+  DT::formatRound(digits =2, columns = c(2,4,5))
+ 
+results_health |> 
+  flextable::flextable() |> 
+  flextable::save_as_pptx(path = './output/deg/number_health_8n.pptx')
+ 
+results_health |> 
+   mutate(Abundance = case_when(estimate >= 1 ~ "More abundant", TRUE ~ "Less abundant") |>
+            as.factor() |> relevel( "More abundant", "Less abundant")) |> 
+   filter(round(p.value, 2) < 0.05) |> 
+   mutate(cell = fct_reorder(cell, estimate)) |>
+  ggplot(data = _ , aes(y=cell, x=estimate, xmin=conf.low, xmax=conf.high)) +
+  geom_point(size = 2) + 
+  geom_errorbarh(height=.1, linewidth = 1) +
+  geom_vline(xintercept=1, color='black', linetype='dashed', alpha=.5) +
+  theme_classic() + 
+  theme(text = element_text(size = 30), 
+        legend.position = "none", 
+        axis.title.y = element_blank()
+        ) 
+```
+
+```{r abundance_health_time_fisher}
+data_time <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::count(time, cell_type_fine) |> 
+  pivot_wider(names_from = time, values_from = n) |>
+  transmute(
+    cell_type_fine = cell_type_fine,
+    cells_in_exposure = T1,
+    cells_in_control = T4,
+    other_cells_in_exposure = sum(T1)-cells_in_exposure,
+    other_cells_in_control = sum(T4)-cells_in_control) 
+
+results_time <- map_df(.x = 1:nrow(data_time), 
+                       ~ dplyr::slice(data_time, .x) %>% 
+                         dplyr::select(2:5) |> 
+                         as.matrix() |> 
+                         matrix(byrow = T, nrow = 2) |> 
+                         fisher.test() |> 
+                         broom::glance()
+                       )
+
+results_time2 <- cbind(data_time, results_time)
+
+seurat.integrated2@meta.data <- seurat.integrated2@meta.data |> 
+  mutate(health = case_when(Condition == "Patient" & time == "T1" ~ "diseased", 
+                            TRUE ~ "undiseased") |> as.factor() |> relevel(ref = "undiseased")
+         )
+
+data_health <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4", 
+                       "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::count(health, cell_type_fine) |> 
+  pivot_wider(names_from = health, values_from = n) |>
+  transmute(
+    cell_type_fine = cell_type_fine,
+    cells_in_exposure = diseased,
+    cells_in_control = undiseased,
+    other_cells_in_exposure = sum(diseased)-cells_in_exposure,
+    other_cells_in_control = sum(undiseased)-cells_in_control) 
+
+results_health <- map_df(.x = 1:nrow(data_health), 
+                       ~ dplyr::slice(data_health, .x) %>% 
+                         dplyr::select(2:5) |> 
+                         as.matrix() |> 
+                         matrix(byrow = T, nrow = 2) |> 
+                         fisher.test() |> 
+                         broom::glance()
+                       )
+
+results_health2 <- cbind(data_health, results_health)
+
+abundance_health_time_fisher <- bind_rows(results_health2, results_time2, .id = "Comparison") |>
+  # filter(p.value < 0.05) |>
+  filter(p.value*56 < 0.05) |> # multiple comparisons adjustment
+  # filter(cell_type_fine == "Non-switched memory B cells") |>
+  mutate(Comparison = case_when(Comparison == "1" ~ "Infected/Healthy",
+                                Comparison == "2" ~ "T1/T4")) |> 
+ ggplot(data = _ , aes(y=cell_type_fine, 
+                       x=estimate, 
+                       xmin=conf.low, 
+                       xmax=conf.high, 
+                       color = Comparison)
+        ) +
+  geom_point(size = 2, position= position_dodge(width=0.2)) + 
+  geom_errorbarh(height=0, size = 1, position= position_dodge(width=0.25)) +
+  geom_vline(xintercept=1, color='black', linetype='dashed', alpha=.5) +
+  theme_classic() + theme(text = element_text(size = 30), 
+                          legend.position = c(0.92, 0.98),
+                          axis.title.y = element_blank(),
+                          legend.title = element_blank()) +
+  xlab("Odds Ratio \n \u27f5 Less in numerator More in numerator \u27f6")
+```
+
+```{r abundance_time_glm}
+data_time <- seurat.integrated2@meta.data |>
+  filter(sample %in% c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::select(cell_type_fine, Subject_ID, time) 
+
+# making a list of unique cell types in the data
+cell_type <- data_time |> dplyr::distinct(cell_type_fine) |> pluck(1)
+
+# splitting the data by type of cell and 
+# adding a binary variable to each split that indicates whether a row contains that cell type 
+data_time_binary <- map(.x = cell_type,
+                        ~ data_time |> 
+                          mutate(present = case_when(cell_type_fine == .x ~ 1,
+                                                     TRUE ~ 0) |> as.factor(),
+                                 Subject_ID = Subject_ID |> as.factor(),
+                                 time = time |> as.factor() |> relevel(ref = "T4")
+                                 )
+                        )
+
+# building a glm for each cell-type split
+results_time <- map_df(.x = data_time_binary, .id = "cell",
+                       ~ glm(data = .x, present ~ Subject_ID + time, family = binomial) |>
+                         broom::tidy(conf.int = T) |>
+                         filter(term == "timeT1")# the other coef is for Subject_ID level
+                         ) |> 
+  mutate(cell = cell_type)
+
+results_time2 <- results_time |>
+    mutate(cell = cell |>
+           str_replace(pattern = "Non-switched memory B cells", 
+                                   replacement = "NSMB"),
+         cell = cell |>
+           str_replace(pattern = "Terminal effector CD4 T cells", 
+                                   replacement = "TE CD4 T Cells"),
+         cell = cell |>
+           str_replace(pattern = "Myeloid dendritic cells", 
+                                   replacement = "Myeloid DC"),
+         cell = cell |>
+           str_replace(pattern = "Follicular helper T cells", 
+                                   replacement = "FH T cells")
+    ) |> 
+  mutate(`FDR < 0.05` = p.adjust(p.value, "fdr") <= 0.05) |>
+  filter(round(p.value, 2) < 0.05) |> 
+  # filter(`FDR < 0.05` == TRUE) |>
+     mutate(
+     estimate_exp = estimate |> exp(),
+     conf.low_exp = conf.low |> exp(),
+     conf.high_exp = conf.high |> exp(),
+     estimate_log10 = estimate |> exp() |> log10(),
+     conf.low_log10 = conf.low |> exp() |> log10(),
+     conf.high_log10 = conf.high |> exp() |> log10()
+                           ) |> 
+  mutate(effect_size = case_when(estimate_exp > 1 ~ conf.low_exp-1,
+                                 estimate_exp < 1 ~ conf.high_exp-1)) |> 
+  mutate(cell = fct_reorder(cell, estimate_exp))
+
+p <- results_time2 |> 
+  ggplot(aes(y=cell, x=estimate_exp, xmin=conf.low_exp, xmax=conf.high_exp, color = `FDR < 0.05`
+             )
+         ) +
+  geom_pointrange(shape = 20) +
+  geom_segment(x = 1,
+               xend = 1,
+               y = 0.0,
+               yend = 13,
+               color = "gray") +
+  expand_limits(x = c(0, 2)) +
+  xlab("Odds ratio") +
+  # scale_color_discrete(name = "FDR", labels = c("> 0.05", "< 0.05")) +
+  scale_x_continuous(
+    breaks = c(0, 0.5, 1, 1.5, 2),
+    sec.axis = sec_axis(
+      trans = ~.,
+      breaks = c(0.25, 1, 1.75),
+      labels = c("\u27f5  Enriched at T4", "No change", "Enriched at T1 \u27f6")
+      )
+    ) +
+  geom_text(data = results_time2 |> 
+              filter(estimate_exp >= 1),
+            aes(label = cell, x = conf.high_exp),
+            color = "black",
+            hjust = - 0.01,
+            family = "Arial") +
+  geom_text(data = results_time2 |>
+              filter(estimate_exp <= 1),
+            aes(label = cell, x = conf.low_exp),
+            color = "black",
+            hjust = 1.01,
+            family = "Arial") +
+  ggthemes::theme_tufte() + 
+  theme(
+    text = element_text( #size=16,  
+                        family = "Arial"),
+    axis.text = element_text(color = "black", 
+                             size = 11), # default size of tick labels is 9
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_line(color = "grey"),
+    legend.position = c(0.90, 0.12),
+    axis.line.x.bottom = element_line(color = "grey")
+    )
+
+pngfile <- fs::path("forest_plot.png")
+
+ ggsave(
+  pngfile,
+  p,
+  device = ragg::agg_png,
+  width = 3.55, height = 2.5, units = "in", res = 300,
+  scaling = 0.7
+)
+```
+
+```{r abundance_health_glm}
+seurat.integrated2@meta.data <- seurat.integrated2@meta.data |> 
+  mutate(health = case_when(Condition == "Patient" & time == "T1" ~ "diseased", 
+                            TRUE ~ "undiseased") |> as.factor() |> relevel(ref = "undiseased")
+         )
+
+data_health <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4", "L204185_T1", "L204185_T4", 
+                       "L211932_T1", "L214612_T1", "L218247_T1", "L219519_T1")) |>
+  dplyr::select(cell_type_fine, Subject_ID, health) 
+
+# making a list of unique cell types in the data
+cell_type <- data_health |> dplyr::distinct(cell_type_fine) |> pluck(1)
+
+# splitting the data by type of cell and 
+# adding a binary variable to each split that indicates whether a row contains that cell type 
+data_health_binary <- map(.x = cell_type,
+                        ~ data_health |> 
+                          mutate(present = case_when(cell_type_fine == .x ~ 1,
+                                                     TRUE ~ 0) |> as.factor(),
+                                 Subject_ID = Subject_ID |> as.factor()
+                                 )
+                        )
+
+# building a glm for each cell-type split
+results_health <- map_df(.x = data_health_binary, .id = "cell",
+                       ~ glm(data = .x, present ~ Subject_ID + health, family = binomial) |>
+                         broom::tidy(conf.int = T) |>
+                         dplyr::slice(7) |> # only the 3rd row of output contains the effect of health
+                         mutate(across(.cols = c(estimate, conf.low, conf.high), exp))
+                       ) |> 
+  mutate(cell = cell_type)
+```
+
+```{r abundance_health_time_glm}
+ abundance_health_time_glm <- 
+  # bind_rows(results_health, results_time, .id = "Comparison") |>
+  results_time |>
+  # filter(p.value < 0.05) |>
+  # filter(p.value*56 < 0.05) |> # multiple comparisons adjustment
+  # filter(cell_type_fine == "Non-switched memory B cells") |>
+  # mutate(Comparison = case_when(Comparison == "1" ~ "Infected/Healthy",
+  #                               Comparison == "2" ~ "T1/T4")) |> 
+  # dplyr::filter(Comparison == "T1/T4") |> 
+  mutate(cell = fct_reorder(cell, estimate)) |> 
+  mutate(significance = case_when(p.value*56 < 0.05 ~ "Significant adjusted",
+                                p.value*56 > 0.05 ~ "Significant nominal")) |> 
+ ggplot(data = _ , aes(y=cell, 
+                       x=estimate, 
+                       xmin=conf.low, 
+                       xmax=conf.high, 
+                       color = significance
+                       )
+        ) +
+  geom_point(size = 2, position= position_dodge(width=0.2)) + 
+  geom_errorbarh(height=0, size = 1, position= position_dodge(width=0.25)) +
+  geom_vline(xintercept=1, color='black', linetype='dashed', alpha=.5) +
+  theme_classic() + theme(text = element_text(size = 30), 
+                          legend.position = c(0.85, 0.1),
+                          axis.title.y = element_blank(),
+                          legend.title = element_blank()) +
+  xlab("Odds Ratio \n \u27f5 Less abundant in T1 More abundant in numerator \u27f6")
+```
+
+```{r abundance_time_edgeR}
+seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+
+# removing cells with fewer than 500 detected genes otherwise the FindNeighbors step fails because of matirx sparsity
+seurat.integrated2 <- subset(seurat.integrated, nFeature_originalexp > 500)
+
+# removing the same cells from the labeling objects too
+predictions_dice_m <- readRDS("~/lyme/output/reference sets/predictions_dice_m.rds")
+
+rownames(predictions_dice_m) <- seurat.integrated |> colnames() # needed for next step
+
+predictions_dice_m <- predictions_dice_m[
+  rownames(predictions_dice_m) %in% colnames(seurat.integrated2),
+]
+
+predictions_monaco_f <- readRDS("~/lyme/output/reference sets/predictions_monaco_f.rds")
+
+rownames(predictions_monaco_f) <- seurat.integrated |> colnames() # needed for next step
+
+predictions_monaco_f <- predictions_monaco_f[
+  rownames(predictions_monaco_f) %in% colnames(seurat.integrated2),
+]
+
+# add cell type annotations
+# seurat.integrated2@meta.data$cell_type_coarse <- predictions_monaco_m$labels
+seurat.integrated2@meta.data$cell_type_fine <- predictions_monaco_f$labels
+
+# create a new factor that separates uninfected or recovered samples from infected samples
+seurat.integrated2@meta.data <- seurat.integrated2@meta.data |> 
+  mutate(health = case_when(Condition == "Patient" & time == "T1" ~ "diseased", 
+                            TRUE ~ "undiseased") |> as.factor() |> relevel(ref = "undiseased")
+  )
+
+# specify that we will perform downstream analysis on the un-integrated data
+DefaultAssay(seurat.integrated2) <- "originalexp"
+
+sce2 <-  as.SingleCellExperiment(seurat.integrated2)
+
+#subsetting
+sce3 <- sce2[ , sce2$sample == c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")]
+# normalization ----
+# sce2 <- logNormCounts(sce2)
+
+abundances <- table(sce3$cell_type_fine, sce3$sample) 
+abundances <- unclass(abundances) 
+head(abundances)
+
+library(edgeR)
+# Attaching some column metadata.
+extra.info <- colData(sce3)[match(colnames(abundances), sce3$sample),]
+y.ab <- DGEList(abundances, samples=extra.info)
+y.ab
+
+# filter out low-abundance labels 
+# keep <- filterByExpr(y.ab, group=y.ab$samples$tomato)
+# y.ab <- y.ab[keep,]
+# summary(keep)
+
+# unpaired test will indicate which groups will be significant in a paired test
+design <- model.matrix(~ #as.factor(Subject_ID) + 
+                         as.factor(time) |> relevel(ref = "T4"), data = y.ab$samples)
+
+base::colnames(design2) <- design |> rownames()
+
+# for handling compositional effects read:
+# http://bioconductor.org/books/3.13/OSCA.multisample/differential-abundance.html#testing-against-a-log-fold-change-threshold
+
+y.ab <- estimateDisp(y = y.ab, design = design, trend="none")
+summary(y.ab$common.dispersion)
+
+fit.ab <- glmQLFit(y.ab, design, robust=TRUE, abundance.trend=FALSE)
+
+res <- glmQLFTest(fit.ab, coef=ncol(design))
+summary(decideTests(res))
+
+topTags(res)
+```
+
+```{r abundance_time_nb}
+participants <- readxl::read_excel("data/sc_sampleData.xlsx")
+
+# # Dropping empty rows instead of empty cell types
+# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
+# 
+# countData <- countData |> dplyr::select(c(1, 2, L204127_T1, L204127_T4, L204185_T1, L204185_T4))) |> drop_na() |>
+#   mutate(cell = cell |> as.factor())
+# 
+# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |> 
+# map(.x = _, ~dplyr::select(.x, c(L204127_T1, L204127_T4, L204185_T1, L204185_T4)))
+
+# # Dropping empty cell types instead of empty rows
+countData_list <- map(cts.split.modified[-c(7,8)], ~as.data.frame(.x) |>
+                        dplyr::select(c(L204127_T1, L204127_T4, L204185_T1, L204185_T4))
+)
+
+colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
+
+time <- vector("list", length = length(countData_list))
+
+for(i in seq_along(time)){ 
+  time[[i]] <- MASS::glm.nb(data =
+                              countData_list[[1]] |> t() |> as.data.frame() |> rownames_to_column() |>
+                              dplyr::select(1:2) |> full_join(colData_list[[1]], by = c("rowname" = "sample")),
+                            formula = ~ as.factor(Subject_ID) + (as.factor(time) |> relevel("T1", "T4"))
+  )
+  # run DESeq2
+  time[[i]] <- DESeq(time[[i]])
+  # Generate results object
+  time[[i]] <- results(time[[i]])
+  time[[i]] <- as.data.frame(time[[i]])
+}
+
+# names(time) <- countData$cell |> levels()
+names(time) <- cts.split.modified[-c(7,8)] |> names()
+
+de_time <- map_dfr(
+  .x = time, 
+  ~filter(.x, padj < 0.05) |> rownames_to_column(),
+  .id ="cell"
+)
+
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME") # the info to get from the database
+    ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+  )
+
+de_time <- de_time |> 
+  dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")|>
+  dplyr::select(cell, gene, ID, role, padj, 3:8)
+
+# de_time |> DT::datatable() |>
+#   DT::formatRound(digits =2, columns = 3:8)
+
+write.xlsx(de_time, './output/deg/de_time.xlsx')
+```
+
+```{r pathway_ronto}
+require(ROntoTools) 
+kpg <- keggPathwayGraphs("hsa", verbose = FALSE)
+
+# Using this attribute the function setEdgeWeights sets the same weight for all the interactions of the same type:
+kpg <- setEdgeWeights(kpg, edgeTypeAttr = "subtype",
+                      edgeWeightByType = list(activation = 1, inhibition = -1,
+                                              expression = 1, repression = -1),
+                      defaultWeight = 0)
+
+#At this point, kpg contains a list of graphs with weighted edges:
+head(edgeData(kpg[["path:hsa04110"]], attr = "weight"))
+
+# To retrieve the title of the pathways and not just their ids the function keggPathwayNames can  be used:
+kpn <- keggPathwayNames("hsa")
+head(kpn)
+
+#####
+# Experiment data
+genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
+  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
+
+genes <- genes |> 
+  left_join(
+    AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = genes$ID, # which genes to look up in the database
+      keytype = "ENSEMBL", # type of identifier in the previous argument 
+      columns = c("GENENAME", "ENTREZID") # the info to get from the database
+      ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
+    )
+
+de_time <- map_dfr(
+  .x = time,
+  ~ .x |> results() |> as.data.frame() |> 
+    filter(padj < 0.05) |> rownames_to_column(),
+  .id ="cell"
+)
+
+de_time <- de_time |> 
+  dplyr::rename(ID = rowname) |> 
+  left_join(genes, by = "ID")
+
+fcAll <- de_time |> dplyr::filter(cell == "Classical monocytes") |> pluck("log2FoldChange")
+
+names(fcAll) <- de_time |> dplyr::filter(cell == "Classical monocytes") |> 
+  mutate(ENTREZID = paste0("hsa:", ENTREZID)) |> pluck("ENTREZID")
+  
+pvAll <- de_time |> dplyr::filter(cell == "Classical monocytes") |> pluck("pvalue")
+
+names(pvAll) <- de_time |> dplyr::filter(cell == "Classical monocytes") |> 
+  mutate(ENTREZID = paste0("hsa:", ENTREZID)) |> pluck("ENTREZID")
+
+
+kpg <- setNodeWeights(kpg, weights = alphaMLG(pvAll), defaultWeight = 1)
+
+peRes <- pe(x = fcAll, graphs = kpg, ref = NULL, nboot = 200, verbose = FALSE)
+
+pathway_results <- Summary(peRes, pathNames = kpn, totalAcc = FALSE, totalPert = FALSE, pAcc = FALSE, pORA = FALSE, comb.pv = NULL, order.by = "pPert") |> rownames_to_column() |> 
+  dplyr::rename(KEGG_pathway = rowname, name = pathNames, p.val = pPert, adj.p.val = pPert.fdr) |>
+  mutate_if(is.numeric, ~round(.x, 3))
+```
+
+```{r pathway_gsea}
+library(fgsea)
+library(dorothea)
+library(progeny)
+
+hallmarks <- fgsea::gmtPathways("./data/pathway datasets/hallmark.genesets.v6.1.symbols.gmt") #50 gene sets
+kegg <- fgsea::gmtPathways("./data/pathway datasets/kegg.genesets.v6.1.symbols.gmt") #186
+go <- fgsea::gmtPathways("./data/pathway datasets/GOTerms.BP.v6.1.symbols.gmt") #4436
+reactome <- fgsea::gmtPathways("./data/pathway datasets/reactome.genesets.v6.1.symbols.gmt") #674
+
+gene_sets <- c(hallmarks, kegg, go, reactome)
+
+time2 <- vector("list", length = length(time))
+
+for(i in seq_along(time)){ 
+  time2[[i]] <- time[[i]]|> 
+    results() |> 
+    as.data.frame() |> 
+    drop_na() |> 
+    rownames_to_column()|> 
+    mutate(gene = rowname) |> 
+    column_to_rownames("rowname") |>  
+    arrange(desc(log2FoldChange)) |>
+    transmute(fold_changes = setNames(object = log2FoldChange, nm = gene))
+}
+
+# cm <- time[[2]]|> drop_na()
+# 
+# # We will need to organize our genes and rank them by logFC. Here's just a little wrangling
+# cm$gene <- rownames(cm)
+# cm <- cm |> arrange(desc(log2FoldChange))
+# fold_changes <- cm$log2FoldChange 
+# names(fold_changes) <- cm$gene
+
+# Now, let's run GSEA, looking for genesets that are upregulated or downregualted comparing memory vs. naive T cells
+
+gsea_cm <- map(.x = time2, ~fgsea(pathways = gene_sets,
+                                  stats = .x$fold_changes,
+                                  minSize=5,
+                                  maxSize=5000,
+                                  nproc = 2))
+
+pathways <- hallmarks |> names() |> str_remove("HALLMARK_")
+
+pathway_frequency <- hallmarks |> 
+  map2(.x = _, .y = pathways, ~ as.data.frame(.x) |> 
+         mutate(present = 1) |> rename(".x" = "gene", "present" = .y)) |>
+  map_dfc(.x = _ , ~ left_join(de_time, .x) |> dplyr::select(11))
+
+# calculating the cumulative frequency for each pathway
+# a pathway may be counted twice if a member gene is DE in two different cell types
+selected_pathways <- pathway_frequency |> 
+  colSums(na.rm = TRUE) |>  
+  as.data.frame() |>
+  rownames_to_column() |> 
+  dplyr::rename("hallmark_pathway" = 1, "no._differentially_expressed" = 2) |> 
+  arrange(desc(no._differentially_expressed)) |> 
+  filter(no._differentially_expressed > 0) #|> pluck("hallmark_pathway")
+
+de_time |> bind_cols(dplyr::select(pathway_frequency, any_of(selected_pathways |> pluck(1)))) |>
+  mutate(across(where(is.numeric), ~ replace_na(.x, 0))) |> dplyr::count(gene) |> 
+   write.csv("gene_functions.csv")
+```
+
+```{r}
+hallmarks_description <- data.frame(
+  stringsAsFactors = FALSE,
+     hallmark_pathway = c("APICAL_JUNCTION",
+                       "APICAL_SURFACE","PEROXISOME","ADIPOGENESIS","ANGIOGENESIS",
+                       "EPITHELIAL_MESENCHYMAL_TRANSITION","MYOGENESIS",
+                       "SPERMATOGENESIS","PANCREAS_BETA_CELL","DNA_REPAIR",
+                       "UV_RESPONSE_DOWN","UV_RESPONSE_UP","ALLOGRAFT_REJECTION",
+                       "COAGULATION","COMPLEMENT","INTERFERON_ALPHA_RESPONSE",
+                       "INTERFERON_GAMMA_RESPONSE","IL6_JAK_STAT3_SIGNALING",
+                       "INFLAMMATORY_RESPONSE","BILE_ACID_METABOLISM",
+                       "CHOLESTEROL_HOMEOSTASIS","FATTY_ACID_METABOLISM","GLYCOLYSIS",
+                       "HEME_METABOLISM","OXIDATIVE_PHOSPHORYLATION",
+                       "XENOBIOTIC_METABOLISM","APOPTOSIS","HYPOXIA","PROTEIN_SECRETION",
+                       "UNFOLDED_PROTEIN_RESPONSE",
+                       "REACTIVE_OXYGEN_SPECIES_PATHWAY","E2F_TARGETS","G2M_CHECKPOINT",
+                       "MYC_TARGETS_V1",
+                       "MYC_TARGETS_V2","P53_PATHWAY","MITOTIC_SPINDLE",
+                       "ANDROGEN_RESPONSE","ESTROGEN_RESPONSE_EARLY",
+                       "ESTROGEN_RESPONSE_LATE","IL2_JAK_STAT5_SIGNALING","KRAS_SIGNALING_UP",
+                       "KRAS_SIGNALING_DOWN","MTORC1_SIGNALING",
+                       "NOTCH_SIGNALING","PI3K_AKT_MTOR_SIGNALING","HEDGEHOG_SIGNALING",
+                       "TGF_BETA_SIGNALING","TNFA_SIGNALING_VIA_NFKB",
+                       "WNT_BETA_CATENIN_SIGNALING"),
+  pathway_category = c("cellular component",
+                       "cellular component","cellular component","development",
+                       "development","development","development","development",
+                       "development","DNA damage","DNA damage","DNA damage",
+                       "immune","immune","immune","immune","immune","immune",
+                       "immune","metabolic","metabolic","metabolic",
+                       "metabolic","metabolic","metabolic","metabolic","pathway",
+                       "pathway","pathway","pathway","pathway","proliferation",
+                       "proliferation","proliferation","proliferation",
+                       "proliferation","proliferation","signaling","signaling",
+                       "signaling","signaling","signaling","signaling",
+                       "signaling","signaling","signaling","signaling","signaling",
+                       "signaling","signaling"),
+pathway_description = c("Apical junction complex consisting of adherens and tight junctions",
+                       "Membrane proteins in the apical domain","Peroxisomes",
+                       "Adipocyte development","Blood vessel formation",
+                       "Epithelial mesenchymal transition","Muscle differentiation",
+                       "Sperm development and male fertility",
+                       "Genes specific to pancreatic beta cells","DNA repair",
+                       "UV response: down-regulated genes",
+                       "UV response: up-regulated genes",
+                       "Allograft rejection","Coagulation cascade","Complement cascade",
+                       "Interferon alpha response","Interferon gamma response",
+                       "IL6 STAT3 signaling during acute phase response","Inflammation",
+                       "Biosynthesis of bile acids","Cholesterol homeostasis",
+                       "Fatty acid metabolism",
+                       "Glycolysis and gluconeogenesis","Heme metabolism",
+                       "Oxidative phosphorylation and citric acid cycle",
+                       "Metabolism of xenobiotics",
+                       "Programmed cell death; caspase pathway",
+                       "Response to hypoxia; HIF1A targets","Protein secretion",
+                       "Unfolded protein response; ER stress",
+                       "Reactive oxygen species (ROS) pathway",
+                       "E2F targets","Cell cycle G2/M checkpoint",
+                       "MYC targets variant 1","MYC targets variant 2","p53 pathway",
+                       "Mitotic spindle assembly","Androgen response",
+                       "Early estrogen response","Late estrogen response",
+                       "IL2 STAT5 signaling","KRAS signaling, up-regulated genes",
+                       "KRAS signaling, down-regulated genes","mTORC1 signaling",
+                       "Notch signaling","PI3K signaling via AKT to mTORC1",
+                       "Hedgehog signaling","TGF beta signaling",
+                       "TNFA signaling via NFkB","Cannonical beta catenin pathway"),
+      pathway_size = c(200L,44L,107L,200L,36L,
+                       200L,200L,135L,40L,150L,144L,158L,200L,138L,200L,
+                       97L,200L,87L,200L,112L,74L,158L,200L,200L,200L,
+                       200L,161L,200L,96L,113L,49L,200L,200L,200L,58L,
+                       200L,200L,117L,200L,200L,200L,200L,200L,200L,32L,
+                       105L,36L,54L,200L,42L)
+  ) 
+
+de_nested_df <- de_time |> dplyr::select(gene) |>  distinct() |> 
+  inner_join(
+    hallmarks |>
+      map_dfr(.x = _, ~ base::as.data.frame(.x), .id = "hallmark_pathway") |>
+      mutate(hallmark_pathway = hallmark_pathway |> str_remove("HALLMARK_")) |> 
+      rename(".x" = "gene"), multiple = "all") |>
+  nest_by(hallmark_pathway) 
+
+de_nested_df <- de_nested_df |> 
+            mutate(
+              hallmark_pathway = case_when(
+  hallmark_pathway ==             "IL2_STAT5_SIGNALING" ~         "IL2_JAK_STAT5_SIGNALING",
+  hallmark_pathway ==               "KRAS_SIGNALING_DN" ~             "KRAS_SIGNALING_DOWN",
+  hallmark_pathway ==             "PANCREAS_BETA_CELLS" ~              "PANCREAS_BETA_CELL",
+  hallmark_pathway == "REACTIVE_OXIGEN_SPECIES_PATHWAY" ~ "REACTIVE_OXYGEN_SPECIES_PATHWAY",
+  hallmark_pathway ==                  "UV_RESPONSE_DN" ~                "UV_RESPONSE_DOWN",
+  .default = hallmark_pathway
+                )
+              )
+
+# each gene is counted only once even if it is DE in two different cell types
+de_nested_df |> 
+  mutate(no._differentially_expressed = map_dbl(.x = data, ~length(.x))) |> 
+  mutate(differentially_expressed_genes = map_chr(.x = data, ~ paste(.x , collapse = ", "))) |>
+  left_join(hallmarks_description) |> 
+  mutate(`%_differentially_expressed` = ((no._differentially_expressed/pathway_size)*100) |> round(digits = 2)) |>
+  dplyr::select(hallmark_pathway, 
+                # pathway_category, 
+                # pathway_description, 
+                pathway_size, 
+                no._differentially_expressed, 
+                `%_differentially_expressed`, 
+                differentially_expressed_genes) |> 
+  arrange(desc(`%_differentially_expressed`)) |> 
+  write.xlsx("deg_in_hallmark.xlsx")
+```
+
+```{r}
+pathways <- kegg |> names() |> str_remove("KEGG_")
+
+pathway_sizes <- kegg |> map_dbl(.x = _, ~ length(.x)) |> as.data.frame() |> rownames_to_column() |> 
+  mutate(rowname = rowname |> str_remove("KEGG_")) |> 
+  rename(rowname = "kegg_pathway", "map_dbl(.x = kegg, ~length(.x))" = "pathway_size")
+
+pathway_frequency <- kegg |> 
+  map2(.x = _, .y = pathways, ~ as.data.frame(.x) |> 
+         mutate(present = 1) |> rename(".x" = "gene", "present" = .y)) |>
+  map_dfc(.x = _ , ~ left_join(de_time, .x) |> dplyr::select(11))
+
+de_nested_df <- de_time |> dplyr::select(gene) |>  distinct() |> 
+  inner_join(
+    kegg |>
+      map_dfr(.x = _, ~ base::as.data.frame(.x), .id = "kegg_pathway") |>
+      mutate(kegg_pathway = kegg_pathway |> str_remove("KEGG_")) |> 
+      rename(".x" = "gene"), multiple = "all") |>
+  nest_by(kegg_pathway) 
+
+# each gene is counted only once even if it is DE in two different cell types
+de_nested_df |> 
+  mutate(no._differentially_expressed = map_dbl(.x = data, ~length(.x))) |> 
+  mutate(differentially_expressed_genes = map_chr(.x = data, ~ paste(.x , collapse = ", "))) |>
+  left_join(pathway_sizes) |> 
+  mutate(`%_differentially_expressed` = ((no._differentially_expressed/pathway_size)*100) |> round(digits = 2)) |>
+  dplyr::select(kegg_pathway, 
+                # pathway_category, 
+                # pathway_description, 
+                pathway_size, 
+                no._differentially_expressed, 
+                `%_differentially_expressed`, 
+                differentially_expressed_genes) |> 
+  arrange(desc(`%_differentially_expressed`)) |> 
+  write.xlsx("deg_in_kegg.xlsx")
+```
+
+```{r driver_identification}
+library(WGCNA)
+gsg <- goodSamplesGenes(cts.t)
+summary(gsg)
+gsg$allOK
+
+table(gsg$goodGenes)
+table(gsg$goodSamples)
+
+# remove genes that are detectd as outliers
+data <- cts.t[gsg$goodGenes == TRUE,]
+
+
+# detect outlier samples - hierarchical clustering - method 1
+htree <- hclust(dist(t(data)), method = "average")
+plot(htree)
+
+# pca - method 2
+
+pca <- prcomp(t(data))
+pca.dat <- pca$x
+
+pca.var <- pca$sdev^2
+pca.var.percent <- round(pca.var/sum(pca.var)*100, digits = 2)
+
+pca.dat <- as.data.frame(pca.dat)
+
+ggplot(pca.dat, aes(PC1, PC2)) +
+  geom_point() +
+  geom_text(label = rownames(pca.dat)) +
+  labs(x = paste0('PC1: ', pca.var.percent[1], ' %'),
+       y = paste0('PC2: ', pca.var.percent[2], ' %'))
+```
+
+```{r abundance_lemur}
+library(lemur)
+library(SingleCellExperiment)
+
+seurat.integrated2@meta.data <- seurat.integrated2@meta.data |> 
+  mutate(health = case_when(Condition == "Patient" & time == "T1" ~ "diseased", 
+                            TRUE ~ "undiseased") |> as.factor() |> relevel(ref = "undiseased")
+  )
+
+keep <- seurat.integrated2@meta.data |> 
+  filter(sample %in% c("L204127_T1","L204127_T4","L204185_T1","L204185_T4","L211932_T1","L214612_T1","L218247_T1","L219519_T1")) |> rownames_to_column() |> pluck("rowname")
+
+sce <-  as.SingleCellExperiment(seurat.integrated2)
+
+sce <- sce[, keep]
+
+fit <- lemur(sce, design = ~ as.factor(Subject_ID) + health, n_embedding = 15)
+fit <- align_harmony(fit)   # This step is optional
+fit <- test_de(fit, contrast = cond(condition = "diseased") - cond(condition = "undiseased"))
+neighborhoods <- find_de_neighborhoods(fit, counts = counts(sce), group_by = vars(as.factor(Subject_ID) + health))
+
+# To get a better idea of the expression differences across all genes, we make a vulcano plot of the differential expression results.
+
+neighborhoods %>%
+  ggplot(aes(x = lfc, y = -log10(pval))) +
+  geom_point(aes(color  = adj_pval < 0.1)) +
+  labs(title = "Vulcano plot of the neighborhoods")
+```
