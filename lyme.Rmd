@@ -364,6 +364,156 @@ fine_multiple <- plot_supervised_fine |> layer_data(1) |>
                         family = "Arial")
         )
 
+##
+##PBMC UMAPs (Fig 5C)
+##
+Fig5C_df <- res_0.9@meta.data |> 
+  base::cbind(res_0.9@reductions$umap@cell.embeddings)
+
+table(Fig5C_df$Condition, Fig5C_df$patient)
+table(Fig5C_df$time, Fig5C_df$patient)
+table(Fig5C_df$time, Fig5C_df$Condition)
+
+
+# Create a new column that combined condition and patient
+Fig5C_df$condition_patient <- paste(Fig5C_df$Condition, Fig5C_df$patient, sep = "_")
+# If condition_patient has control, then change to control
+Fig5C_df$condition_patient <- str_replace(Fig5C_df$condition_patient, "Control.*", "Control")
+
+Fig5C_df$condition_time <- paste(Fig5C_df$Condition, Fig5C_df$time, sep = "_")
+Fig5C_df$condition_time <- str_replace(Fig5C_df$condition_time, "Control.*", "Control")
+
+# Drop Patient_205994 Patient_206002
+Fig5C_df <- Fig5C_df |> filter(condition_patient != "Patient_205994", condition_patient != "Patient_206002")
+
+
+Fig5C_df$condition_patient_time <- paste(Fig5C_df$Condition, Fig5C_df$patient, sep = "_")
+Fig5C_df$condition_patient_time <- paste(Fig5C_df$condition_patient_time, Fig5C_df$time, sep = "_")
+
+Fig5C_df$condition_patient_time <- str_replace(Fig5C_df$condition_patient_time, "Control.*", "Control")
+
+cond_time <- ggplot(Fig5C_df, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(size = 0.03767612, stroke = 0.5, shape = 19) + 
+  #gghighlight(use_direct_label = F) + 
+  facet_wrap(~ condition_time) + 
+  ggthemes::theme_tufte() + 
+  xlab("UMAP 1") +
+  ylab(expression("UMAP 2")) +
+  guides(color = guide_legend(override.aes = list(size = 4), title = "Cell Type"))
+
+ggsave("Control_Time_AllCells.png",
+cond_time ,
+#height = 6.22,
+width = 12.22,
+units = "in",
+dpi = 320,
+device = "png", ,bg="white")
+
+####
+#### Time and patient 
+####
+cond_time_pat <- ggplot(Fig5C_df, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(size = 0.03767612, stroke = 0.5, shape = 19) + 
+  #gghighlight(use_direct_label = F) + 
+  facet_wrap(~ condition_patient_time) + 
+  ggthemes::theme_tufte() + 
+  xlab("UMAP 1") +
+  ylab(expression("UMAP 2")) +
+  guides(color = guide_legend(override.aes = list(size = 4), title = "Cell Type"))
+
+ggsave("Control_Time_Patient_AllCells.png",
+cond_time_pat,
+#height = 6.22,
+width = 12.22,
+units = "in",
+dpi = 320,
+device = "png", ,bg="white")
+
+
+# Subset by cell types in list
+list_cells <- c("Non-switched memory B cells", "Naive B cells", "Naive CD8 T cells", "Follicular helper T cells", "Th1 cells", "Naive CD4 T cells", "Classical monocytes", "Vd2 gd T cells", "Th1/Th17 cells", "MAIT cells", "Non-Vd2 gd T cells", "Myeloid dendritic cells")
+
+# Subset by cell types in list
+Fig5C_df_subset <- Fig5C_df |> filter(cell_type_fine %in% list_cells)
+
+cond_time_sub <- ggplot(Fig5C_df_subset, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(size = 0.03767612, stroke = 0.5, shape = 19) + 
+  #gghighlight(use_direct_label = F) + 
+  facet_wrap(~ condition_time) + 
+  ggthemes::theme_tufte() + 
+  xlab("UMAP 1") +
+  ylab(expression("UMAP 2")) +
+  guides(color = guide_legend(override.aes = list(size = 4), title = "Cell Type"))
+
+ggsave("Control_Time_SubsetCells.png",
+cond_time_sub,
+#height = 6.22,
+width = 12.22,
+units = "in",
+dpi = 320,
+device = "png", ,bg="white")
+
+#### Time and patient 
+cond_time_pat <- ggplot(Fig5C_df_subset, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(size = 0.03767612, stroke = 0.5, shape = 19) + 
+  #gghighlight(use_direct_label = F) + 
+  facet_wrap(~ condition_patient_time) + 
+  ggthemes::theme_tufte() + 
+  xlab("UMAP 1") +
+  ylab(expression("UMAP 2")) +
+  guides(color = guide_legend(override.aes = list(size = 4), title = "Cell Type"))
+
+ggsave("Control_Time_Patient_SubCells.png",
+cond_time_pat,
+#height = 6.22,
+width = 12.22,
+units = "in",
+dpi = 320,
+device = "png", ,bg="white")
+
+
+###
+### Classical Monocytes with gene list
+###
+DefaultAssay(res_0.9) = 'originalexp'
+
+# subset to classical monocytes
+Idents(res_0.9) <- res_0.9$cell_type_fine
+classical_monocytes <- subset(res_0.9, idents = "Classical monocytes")
+
+plot_genes <- c("CD14", "FCGR3A", "HBEGF", "GPR183", "RASGEF1B", "ATF3", "IER3", "MXD1", "CCL3L1", "NR4A1", "NFIL3", "NAMPT", "SGK1", "RIPK2", "BCL2A1", "TMEM170B", "EGR1", "CXCL8", "EREG", "ZFP36", "PLAUR", "BTG2", "KLF10", "C5AR1", "IFITM3", "RGS2", "STK17B", "PF4", "PPBP")
+
+annot <- AnnotationDbi::select(
+      org.Hs.eg.db, # the database
+      keys = plot_genes, # which genes to look up in the database
+      keytype = "SYMBOL", # type of identifier in the previous argument 
+      columns = c("ENSEMBL") # the info to get from the database
+    )
+annot <- annot[!annot$ENSEMBL %in% c("ENSG00000237155", "ENSG00000230128", "ENSG00000227231", "ENSG00000235030", "ENSG00000206478", "ENSG00000277796", "ENSG00000277768", "ENSG00000277336"),]
+
+annot$SYMBOL <- gsub("FCGR3A", "CD16", annot$SYMBOL)
+
+out <- FeaturePlot(classical_monocytes, dim=c(2,1), features = annot$ENSEMBL, combine = FALSE)
+
+
+for(i in 1:length(out)) {
+  out[[i]] <- out[[i]] + NoLegend() + NoAxes() + ggtitle(annot$SYMBOL[i]) + theme(plot.title = element_text(size = 14))
+}
+
+out_cow <- cowplot::plot_grid(plotlist = out)
+ggsave("Fig5E_ClassicMono_UMAP_V2.png",
+out_cow,
+height = 14.22,
+width = 12,
+units = "in",
+dpi = 320,
+device = "png", ,bg="white")
+
+
+
+
+
+
 # umap_plot <- rvg::dml(ggobj = fine_multiple)
 # 
 # read_pptx("template.pptx") |>

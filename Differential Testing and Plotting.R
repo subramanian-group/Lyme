@@ -103,23 +103,29 @@ for(i in 1:length(files)){
   resList[[i]] = DESeq_wrapper(sub)
   
   #Sub-population Summary Plots
-  DefaultAssay(sub) = 'integrated'
-  print('Plotting Markers')
+  DefaultAssay(combined) = 'integrated'
   
-  png(paste0("figures_final/scRNAseq EM/SubPops",pops[i],'.png'),width = 1000,height = 800)
-  dim_plot = DimPlot(sub,group.by = 'Identity',label = T,pt.size = 2,label.size = 7) + NoLegend() + ggtitle(pops[i])
+  combined$condition <- factor(combined$condition, levels = c("Unaffected Skin", "EM Lesion"))
+  
+  png(paste0('figures_final/scRNAseq EM/AllPops.png'),width = 1000,height = 800)
+  dim_plot = DimPlot(combined,group.by = 'Identity',label = T,pt.size = 2,label.size = 7) + NoLegend() + ggtitle('All Clusters')
   print(dim_plot)
   dev.off()
   
-  png(paste0("figures_final/scRNAseq EM/DotPlot_",pops[i],'.png'),width = 1000*2,height = 1200*2)
+  png(paste0('AllPops_Split.png'),width = 1200,height = 800)
+  dim_plot = DimPlot(combined,group.by = 'Identity',label = T,pt.size = 2,label.size = 7, split.by = 'condition') + NoLegend() + ggtitle('All Clusters')
+  print(dim_plot)
+  dev.off()
+  
+  png(paste0('figures_final/scRNAseq EM/DotPlot_AllPops.png'),width = 1000*3,height = 1200*3)
   markers_small = markers %>%
     group_by(cluster) %>%
     top_n(n = 2, wt = avg_log2FC)
-  feat = Map(c,markers_used,split(markers_small$gene,markers_small$cluster))
+  feat = Map(c,markers_broad,split(markers_small$gene,markers_small$cluster))
   feat = lapply(feat,unique)
   feat = unique(unlist(feat))
-  dp = DotPlot(sub,features = feat,group.by = 'seurat_clusters',cluster.idents = T,dot.scale = 30,)
-  dp$data$cluster = labels[as.numeric(as.character(dp$data$id))+1]
+  dp = DotPlot(combined,features = feat,group.by = 'seurat_clusters',cluster.idents = T,dot.scale = 20,)
+  dp$data$cluster = labels$Manual[as.numeric(as.character(dp$data$id))+1]
   dp = dp + 
     facet_grid(rows = vars(cluster), 
                scales = "free_y", space = "free_y", switch = "y") +
