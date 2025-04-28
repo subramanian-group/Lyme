@@ -1,0 +1,586 @@
+---
+title: "Untitled"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+## Libraries
+
+```{r optLibs}
+# Options -----------------------------------------------------------------
+options(stringsAsFactors = FALSE,bitmapType = 'cairo')
+# Libraries ---------------------------------------------------------------
+
+pacman::p_load(ggplot2, ggrepel, RColorBrewer, limma, caret,matrixStats, ComplexHeatmap, tidyr, VennDiagram, grid, UpSetR, STRINGdb, pheatmap, e1071, glmnet, reshape2, ggstance, stringi, factoextra, sva, ggpubr, Hmisc,ggplotify,enrichR,clusterProfiler,msigdbr,DOSE,scales,tibble,edgeR,mice,progress,kableExtra)
+pacman::p_load(ggraph,tidygraph,purrr,rlang,tidyverse,igraph,SummarizedExperiment,ggnewscale,dplyr)
+# pacman::p_load(MetaboAnalystR)
+
+```
+
+## Load Functions
+
+```{r load_functions, results='hide'}
+# Functions ---------------------------------------------------------------
+source(file = "./R/General Functions.R")
+
+returnSigStars = function(x){
+  x2 = x
+  x2[is.numeric(x) & x > 0.05] = "ns"
+  x2[is.numeric(x) & x < 0.05] = "*"
+  x2[is.numeric(x) & x < 0.01] = "**"
+  x2[is.numeric(x) & x < 0.001] = "***"
+  x2[is.numeric(x) & x < 0.0001] = "****"
+  x2
+}
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+palBias = function(x){
+  if(abs(x)>1){
+    break("x must be between -1 and 1")
+  }
+  cool = rainbow(500, start=rgb2hsv(col2rgb('cyan'))[1], end=rgb2hsv(col2rgb('blue'))[1])
+  warm = rainbow(500, start=rgb2hsv(col2rgb('red'))[1], end=rgb2hsv(col2rgb('yellow'))[1])
+  cols = c(rev(cool), rev(warm))
+  if(x<0){
+    cols = cols[ceiling(abs(x)*500):1000]
+  }else{
+    cols = cols[1:ceiling(500+500*(1-x))]
+  }
+  colorRampPalette(cols)(255)
+}
+
+fixNames = function(x){
+  x = gsub("\\..*","",x)
+  x = gsub("-","",x)
+  x = gsub("/.*","",x)
+  x = gsub("\\(.*","",x)
+  x = toupper(x)
+  alias = alias2SymbolTable(x)
+  x[!is.na(alias)] = alias[!is.na(alias)]
+  x
+}
+
+cos.sim = function(x){
+  res = matrix(ncol = ncol(x),nrow = ncol(x))
+  dimnames(res) = list(colnames(x),colnames(x))
+  x = as.data.frame(x)
+  res = mapply(function(xi,i){
+    mapply(function(xj,j){
+      sim = xi%*%xj/(sqrt(sum((xi)^2))*sqrt(sum((xj)^2)))
+      res[i,j] = sim
+      res[j,i] = sim
+    },x,1:ncol(x))
+  },x,1:ncol(x))
+  res
+}
+
+na.omit.all = function(x,MAR=c(1,2)){
+  if(MAR==1){
+    x[apply(x,1,function(x)sum(!is.na(x))>0),]
+  }else if(MAR==2){
+    x[,apply(x,2,function(x)sum(!is.na(x))>0)]
+  }else{
+    x[apply(x,1,function(x)sum(!is.na(x))>0),
+      apply(x,2,function(x)sum(!is.na(x))>0)]
+  }
+}
+
+rcorr.nodups = function(x,y,...){
+  c = rcorr(x,y,...)
+  rows = 1:ncol(x)
+  cols = (ncol(x)+1):(ncol(x)+ncol(y))
+  c$r = c$r[rows,cols]
+  c$n = c$n[rows,cols]
+  c$P = c$P[rows,cols]
+  c
+}
+
+coord_radar <- function (theta = "x", start = 0, direction = 1) 
+{
+  theta <- match.arg(theta, c("x", "y"))
+  r <- if (theta == "x") 
+    "y"
+  else "x"
+  
+  #dirty
+  rename_data <- function(coord, data) {
+    if (coord$theta == "y") {
+      plyr::rename(data, c("y" = "theta", "x" = "r"), warn_missing = FALSE)
+    } else {
+      plyr::rename(data, c("y" = "r", "x" = "theta"), warn_missing = FALSE)
+    }
+  }
+  theta_rescale <- function(coord, x, scale_details) {
+    rotate <- function(x) (x + coord$start) %% (2 * pi) * coord$direction
+    rotate(scales::rescale(x, c(0, 2 * pi), scale_details$theta.range))
+  }
+  
+  r_rescale <- function(coord, x, scale_details) {
+    scales::rescale(x, c(0, .4), scale_details$r.range)
+  }
+  
+  ggproto("CordRadar", CoordPolar, theta = theta, r = r, start = start, 
+          direction = sign(direction),
+          is_linear = function(coord) TRUE,
+          render_bg = function(self, scale_details, theme) {
+            scale_details <- rename_data(self, scale_details)
+            
+            theta <- if (length(scale_details$theta.major) > 0)
+              theta_rescale(self, scale_details$theta.major, scale_details)
+            thetamin <- if (length(scale_details$theta.minor) > 0)
+              theta_rescale(self, scale_details$theta.minor, scale_details)
+            thetafine <- seq(0, 2 * pi, length.out = 100)
+            
+            rfine <- c(r_rescale(self, scale_details$r.major, scale_details))
+            
+            # This gets the proper theme element for theta and r grid lines:
+            #   panel.grid.major.x or .y
+            majortheta <- paste("panel.grid.major.", self$theta, sep = "")
+            minortheta <- paste("panel.grid.minor.", self$theta, sep = "")
+            majorr     <- paste("panel.grid.major.", self$r,     sep = "")
+            
+            ggplot2:::ggname("grill", grid::grobTree(
+              ggplot2:::element_render(theme, "panel.background"),
+              if (length(theta) > 0) ggplot2:::element_render(
+                theme, majortheta, name = "angle",
+                x = c(rbind(0, 0.45 * sin(theta))) + 0.5,
+                y = c(rbind(0, 0.45 * cos(theta))) + 0.5,
+                id.lengths = rep(2, length(theta)),
+                default.units = "native"
+              ),
+              if (length(thetamin) > 0) ggplot2:::element_render(
+                theme, minortheta, name = "angle",
+                x = c(rbind(0, 0.45 * sin(thetamin))) + 0.5,
+                y = c(rbind(0, 0.45 * cos(thetamin))) + 0.5,
+                id.lengths = rep(2, length(thetamin)),
+                default.units = "native"
+              ),
+              
+              ggplot2:::element_render(
+                theme, majorr, name = "radius",
+                x = rep(rfine, each = length(thetafine)) * sin(thetafine) + 0.5,
+                y = rep(rfine, each = length(thetafine)) * cos(thetafine) + 0.5,
+                id.lengths = rep(length(thetafine), length(rfine)),
+                default.units = "native"
+              )
+            ))
+          })
+}
+
+### adapted from diffcyt
+
+testDA_edgeR <- function(counts,cluster_id, design, contrast, 
+                         trend_method = "none", 
+                         min_cells = 3, min_samples = NULL, 
+                         normalize = T, norm_factors = "TMM") {
+  
+  if (is.null(min_samples)) {
+    min_samples <- ncol(counts) / 2
+  }
+  
+  if(missing(cluster_id)){
+    cluster_id = rownames(counts)
+  }
+  
+  cluster_id_all = cluster_id
+  
+  # filtering: keep clusters with at least 'min_cells' cells in at least 'min_samples' samples
+  tf <- counts >= min_cells
+  ix_keep <- apply(tf, 1, function(r) sum(r) >= min_samples)
+  
+  counts <- counts[ix_keep, , drop = FALSE]
+  cluster_id <- cluster_id[ix_keep]
+  
+  # edgeR pipeline
+  
+  # normalization factors
+  if (normalize & norm_factors == "TMM") {
+    norm_factors <- calcNormFactors(counts, method = "TMM")
+  }
+  
+  # note: when using DGEList object, column sums are automatically used for library sizes
+  if (normalize) {
+    y <- DGEList(counts, norm.factors = norm_factors)
+  } else {
+    y <- DGEList(counts)
+  }
+  
+  # estimate dispersions
+  # (note: using 'trend.method = "none"' by default)
+  y <- estimateDisp(y, design, trend.method = trend_method)
+  
+  # fit models
+  fit <- glmFit(y, design)
+  
+  # likelihood ratio tests
+  resList = list()
+  for(i in 1:ncol(contrast)){
+    lrt <- glmLRT(fit, contrast = contrast[,i])
+    top <- edgeR::topTags(lrt, n = Inf, adjust.method = "BH", sort.by = "none")
+    row_data = top$table
+    if(length(cluster_id)!=length(cluster_id_all)){
+      missing_clusts = cluster_id_all[!cluster_id_all%in%cluster_id]
+      missing = matrix(nrow = length(missing_clusts),ncol = ncol(row_data))
+      rownames(missing) = missing_clusts
+      colnames(missing) = colnames(top)
+      row_data = rbind(row_data,missing)
+      row_data = row_data[cluster_id_all,]
+    }
+    resList[[i]] = row_data
+  }
+  names(resList) = colnames(contrast)
+  
+  
+  logFCFrame = do.call(cbind,lapply(resList,function(x)x[,"logFC"]))
+  colnames(logFCFrame) = colnames(contrast)
+  rownames(logFCFrame) = cluster_id_all
+  
+  adjpFrame = do.call(cbind,lapply(resList,function(x)x[,"FDR"]))
+  colnames(adjpFrame) = colnames(contrast)
+  rownames(adjpFrame) = cluster_id_all
+  
+  pFrame = do.call(cbind,lapply(resList,function(x)x[,"PValue"]))
+  colnames(pFrame) = colnames(contrast)
+  rownames(pFrame) = cluster_id_all
+  
+  list(p.adjFrame = adjpFrame,pFrame = pFrame,logFCFrame = logFCFrame)
+}
+
+
+### Adapted from diffcyt
+
+testDS_limma <- function(d_counts, d_medians, design, contrast, 
+                         block_id = NULL, trend = TRUE, weights = TRUE, 
+                         markers_to_test = NULL, 
+                         min_cells = 3, min_samples = NULL, 
+                         plot = FALSE, path = ".") {
+  
+  if (!is.null(block_id) & !is.factor(block_id)) {
+    block_id <- factor(block_id, levels = unique(block_id))
+  }
+  
+  if (is.null(min_samples)) {
+    min_samples <- ncol(d_counts) / 2
+  }
+  
+  # markers to test
+  if (!is.null(markers_to_test)) {
+    markers_to_test <- markers_to_test
+  } else {
+    # vector identifying 'cell state' markers in list of assays
+    markers_to_test <- metadata(d_medians)$id_state_markers
+  }
+  
+  # note: counts are only required for filtering
+  counts <- d_counts
+  cluster_id <- rownames(d_counts)
+  
+  # filtering: keep clusters with at least 'min_cells' cells in at least 'min_samples' samples
+  tf <- counts >= min_cells
+  ix_keep <- apply(tf, 1, function(r) sum(r) >= min_samples)
+  
+  counts <- counts[ix_keep, , drop = FALSE]
+  cluster_id <- cluster_id[ix_keep]
+  
+  # extract medians and create concatenated matrix
+  state_names <- names(assays(d_medians))[markers_to_test]
+  meds <- do.call("rbind", {
+    lapply(as.list(assays(d_medians)[state_names]), function(a) a[as.character(cluster_id), , drop = FALSE])
+  })
+  meds_all <- do.call("rbind", as.list(assays(d_medians)[state_names]))
+  
+  
+  rownames(meds) = paste0(rep(state_names,each=length(cluster_id))," - ",rep(cluster_id,length(state_names)))
+  rownames(meds_all) = paste0(rep(state_names,each=nrow(d_counts))," - ",rep(sort(rownames(d_counts)),length(state_names)))
+  # limma pipeline
+  
+  # estimate correlation between paired samples
+  # (note: paired designs only; >2 measures per sample not allowed)
+  if (!is.null(block_id)) {
+    dupcor <- duplicateCorrelation(meds, design, block = block_id)
+  }
+  
+  # weights: cluster cell counts (repeat for each marker)
+  if (weights) {
+    weights <- counts[as.character(rep(cluster_id, length(state_names))), ]
+    stopifnot(nrow(weights) == nrow(meds))
+  } else {
+    weights <- NULL
+  }
+  
+  # fit models
+  if (!is.null(block_id)) {
+    message("Fitting linear models with random effects term for 'block_id'.")
+    fit <- lmFit(meds, design, weights = weights, 
+                 block = block_id, correlation = dupcor$consensus.correlation)
+  } else {
+    fit <- lmFit(meds, design, weights = weights)
+  }
+  fit <- contrasts.fit(fit, contrast)
+  
+  # calculate moderated tests
+  efit <- eBayes(fit, trend = trend)
+  
+  # results
+  tops = lapply(colnames(contrast),function(x)topTable(efit, coef = x, number = Inf, adjust.method = "BH", sort.by = "none"))
+  names(tops) = colnames(contrast)
+  
+  logFCFrame = sapply(tops,function(x)x$logFC)
+  rownames(logFCFrame) = rownames(tops[[1]])
+  adj.pFrame = sapply(tops,function(x)x$adj.P.Val)
+  rownames(adj.pFrame) = rownames(tops[[1]])
+  
+  list(logFCFrame = logFCFrame,adj.pFrame = adj.pFrame,meds = meds)
+}
+
+plot_pca = function(pca,color,components=c(1,2),label=F,n=10,scale = 5,draw_loadings = F,
+                    legendSize = unit(3,'mm')){
+  d = data.frame(comp1 = pca$x[,components[1]],
+                 comp2 = pca$x[,components[2]],
+                 color=color,
+                 label = rownames(pca$x))
+  
+  vars = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
+  loadings = data.frame(t(apply(pca$rotation,1,function(x)x*pca$sdev))[,components],
+                        x=rep(0,nrow(pca$rotation)),
+                        y=rep(0,nrow(pca$rotation)))
+  loadings$label = rownames(loadings)
+  keep = order(loadings[,components[1]]^2+loadings[,components[2]]^2,decreasing=T)[1:n]
+  loadings = loadings[keep,]
+  legendSize = unit(3,'mm')
+  
+  if(label){
+    p = ggplot(d,aes(x=comp1,y=comp2,color=color,label=label))
+    if(draw_loadings){
+      labs = data.frame(x=c(d[,components[1]],scale*loadings[,1]),
+                        y=c(d[,components[2]],scale*loadings[,2]+sign(scale*loadings[,2])*0.5),
+                        label = c(d$label,loadings$label),
+                        color = c(as.character(d$color),rep("var",nrow(loadings))))
+      p = p + ggrepel::geom_label_repel(labs,
+                                        mapping = aes(x=x,y=y,label=label,color=color),
+                                        inherit.aes = F,
+                                        col = c(gg_color_hue(length(unique(labs$color))-1),"black")[match(labs$color, c(unique(labs$color)[unique(labs$color)!="var"],"var"))],
+                                        max.overlaps = 30,
+                                        size = 15)+
+        geom_segment(loadings,
+                     mapping = aes(x=x,y=y,xend=scale*(x+PC1),yend=scale*(y+PC2)),
+                     inherit.aes = F,
+                     arrow = arrow(length = unit(1,"cm")),size=2)
+    }
+  }else{
+    p = ggplot(d,aes(x=comp1,y=comp2,color=color))+geom_point(size=15)
+    if(draw_loadings){
+      labs = data.frame(x=c(scale*loadings[,1]),
+                        y=c(scale*loadings[,2]),
+                        label = c(loadings$label),
+                        color = c(rep("var",nrow(loadings))))
+      p = p +
+        geom_segment(loadings,
+                     mapping = aes(x=x,y=y,xend=scale*(x+PC1),yend=scale*(y+PC2)),
+                     inherit.aes = F,
+                     arrow = arrow(length = unit(1,"cm")),size=2)+
+        ggrepel::geom_label_repel(labs,
+                                  mapping = aes(x=x,y=y,label=label),
+                                  inherit.aes = F,
+                                  col = 'black',
+                                  max.overlaps = 30,
+                                  size = 15)
+    }
+  }
+  
+  p = p +
+    xlab(vars[components[1]])+
+    ylab(vars[components[2]])+
+    guides(color = guide_legend(title="",byrow = TRUE))+
+    theme(legend.key.size = legendSize,
+          axis.text = element_blank(),
+          plot.title = element_text(hjust = 0.5),
+          legend.spacing.y = unit(3, 'cm'))+
+    theme_minimal(base_size = 60)
+}
+
+```
+
+```{r}
+load("Data/All/Data.RData")
+```
+
+### Fever PCA
+
+```{r outlier}
+sams = data$sampleData$time%in%c("T1")&
+  data$sampleData$Condition=="Patient"&
+  data$sampleData$days_of_prior_antibiotics==0
+
+d = data$assayData
+d = apply(d,2,function(x)(x-mean(x,na.rm=T))/sd(x,na.rm=T))
+d = na.omit(d[sams,])
+colnames(d) = make.unique(fixNames(colnames(d)))
+pca = prcomp(d,scale. = F)
+
+d2 = data.frame(cbind(names = rownames(pca$x),
+                      pca$x,data$assayData[rownames(pca$x),],
+                      data$directSymptoms[rownames(pca$x),],
+                      data$emData[rownames(pca$x),]))
+load = as.data.frame(get_pca_var(pca)$coord[,1:2]*10)
+load$contrib = get_pca_var(pca)$cos2[,1] * 100 / sum(get_pca_var(pca)$cos2[,1]) 
+load$name = rownames(load)
+d2$label = rownames(pca$x)
+d2$label[!d2$label%in%c("104728 T1","201455 T1","204185 T1")] = ""
+vars = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
+legendSize = unit(12,'mm')
+base_size = 40
+point_size = 12
+label_size = 40
+lims = list(c(0,7.2))
+
+
+load_lab = load[order(load$contrib,decreasing = T)[1:15],]
+outs = c("104728 T1","201455 T1","204185 T1")
+load_lab = data.frame(rbind(load_lab,cbind(Dim.1=d2[outs,2],Dim.2=d2[outs,3],contrib=c(1,1,1),name=outs)))
+load_lab$Dim.1 = as.numeric(load_lab$Dim.1)
+load_lab$Dim.2 = as.numeric(load_lab$Dim.2)
+load_lab$size=c(rep(.5,15),rep(1,3))
+load_lab$color=c(rep(gg_color_hue(2)[1],15),rep(gg_color_hue(2)[2],3))
+p1 = ggplot(d2,aes(x=PC1,y=PC2,color=Feverish.Chilly))+
+  geom_point(size=point_size)+
+  theme_minimal(base_size = base_size)+
+  xlab(vars[1])+ylab(vars[2])+
+  theme(legend.key.size = legendSize,
+        axis.text = element_blank(),
+        legend.position="bottom",
+        plot.title = element_text(hjust = 0.5))+
+  labs(color="Symptom\nScore")+
+  ggtitle("Feverish/Chilly")+
+  scale_color_gradient(limits = lims[[1]], oob = scales::squish)+
+  new_scale(new_aes = 'color')+
+  geom_segment(data = load_lab,
+               aes(x=0,y=0,xend=Dim.1,yend=Dim.2,color=color),
+               inherit.aes = F,
+               show.legend = F,arrow = arrow(length = unit(0.03, "npc")))+
+  scale_color_manual(values=c("transparent","black"))+
+  new_scale(new_aes = 'color')+
+  ggrepel::geom_label_repel(data = load_lab,aes(x=Dim.1,y=Dim.2,label=name,
+                                                size=size,
+                                                color = color,fill=color),inherit.aes = F, max.overlaps = 100, show.legend = F,cex=8,alpha=.75)+
+  scale_color_manual(values=c("black","black"))
+  scale_fill_manual(values=c("black","grey30"))
+  # new_scale(new_aes = "color")+
+  # scale_color_manual(values = c("red","blue"))
+pc = as.ggplot(fviz_contrib(pca,choice = "var",top = 25,ggtheme = theme_minimal(base_size = base_size-10)))
+p = ggarrange(p1,pc,ncol = 2,widths = c(.9,1))
+# 
+# png("./figures_final/Olink/Pyrogenic PCA 2.png",width = 400*4,height = 200*4)
+# p
+# dev.off()
+# 
+# rm(sams,d,pca,d2,p1,p2,p3,p4,p5,p)
+# fviz_pca_biplot(pca,select.var=list(controb=15))
+
+p
+```
+
+### Coinfection PCA
+
+```{r outlier}
+t1_coinfection = data$sampleData$T1_coinfection_result[data$sampleData$time=="T1"&data$sampleData$Condition=="Patient"]
+t1_coinfection = data$sampleData$T1_coinfection_result
+t1_coinfection[t1_coinfection%in%c("","anaplasma neg.; B miyamotoi neg.", "Babesia neg. (see comment)", "Babesia PCR neg",
+                                   "neg for RBC smear, babesia PCR", "Negative (Babesia, H6A Abs, Powassan Abs)", 
+                                   "Negative (RBC smear, Babesia PCR)","see comment")|is.na(t1_coinfection)] = "None"
+t1_coinfection[t1_coinfection=="Powassan/deer tick virus Ab+"] = "Powassan"
+t1_coinfection[t1_coinfection=="ND"] = "Not Done"
+t1_coinfection[!t1_coinfection%in%c("None","Powassan","Not Done")] = "Babesia"
+
+sams = (data$sampleData$time%in%c("T1")&data$sampleData$Condition=="Patient"&data$sampleData$days_of_prior_antibiotics==0)
+
+d = data$assayData
+d = apply(d,2,function(x)(x-mean(x,na.rm=T))/sd(x,na.rm=T))
+d = na.omit(d[sams,])
+colnames(d) = make.unique(fixNames(colnames(d)))
+pca = prcomp(d,scale. = F)
+
+sams = rownames(data$assayData)%in%rownames(d)
+t1_coinfection = t1_coinfection[sams]
+
+d2 = data.frame(cbind(names = rownames(pca$x),
+                      coinfection = t1_coinfection,
+                      pca$x,data$assayData[rownames(pca$x),],
+                      data$directSymptoms[rownames(pca$x),],
+                      data$emData[rownames(pca$x),]))
+d2$label = rownames(pca$x)
+vars = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
+legendSize = unit(10,'mm')
+p = ggplot(d2,aes(x=PC1,y=PC2,color=coinfection,label=label))+
+  # ggrepel::geom_label_repel(size=3)+
+  geom_point(size=8)+
+  theme_minimal(base_size = 30)+
+  xlab(vars[1])+ylab(vars[2])+
+  theme(legend.key.size = legendSize,
+        axis.text = element_blank(),
+        plot.title = element_text(hjust = 0.5))+
+  labs(color="co-infection")
+# p
+# png("./figures_final/Olink/Coinfection PCA.png",width = 275*3,height = 175*3)
+# p
+# dev.off()
+# rm(sams,d,pca,d2,p,t1_coinfection,vars)
+# fviz_pca_biplot(pca,select.var=list(controb=15))
+
+p
+```
+
+### EM PCA
+
+```{r outlier}
+sams = (data$sampleData$time%in%c("T1")&
+          data$sampleData$Condition=="Patient"&
+          data$sampleData$days_of_prior_antibiotics==0)
+
+d = data$assayData
+d = apply(d,2,function(x)(x-mean(x,na.rm=T))/sd(x,na.rm=T))
+d = na.omit(d[sams,])
+colnames(d) = make.unique(fixNames(colnames(d)))
+pca = prcomp(d,scale. = F)
+
+sams = rownames(data$assayData)%in%rownames(d)
+
+n_em = data$emData[sams,"Number_of_EM_at_Baseline"]
+em_group = rep("0",nrow(d))
+em_group[n_em==1] = '1'
+em_group[n_em>1&n_em<5] = '2-4'
+em_group[n_em>4] = '5-32'
+em_group[n_em>30] = '35'
+
+d2 = data.frame(cbind(names = rownames(pca$x),
+                      pca$x,data$assayData[rownames(pca$x),],
+                      data$directSymptoms[rownames(pca$x),],
+                      data$emData[rownames(pca$x),],
+                      em_group))
+d2$em_group = factor(d2$em_group,levels = c("0","1","2-4","5-32","35"),ordered = T)
+vars = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
+legendSize = unit(3,'mm')
+p = ggplot(d2,aes(x=PC1,y=PC2,color=em_group,label=names))+
+  # ggrepel::geom_label_repel(size=3)+
+  geom_point(size=10)+
+  theme_minimal(base_size = 30)+
+  xlab(vars[1])+ylab(vars[2])+
+  labs(color="Number\nof EM")+
+  theme(legend.key.size = legendSize,
+        axis.text = element_blank(),
+        plot.title = element_text(hjust = 0.5))+
+  scale_color_hue()
+# p
+# png("./figures_final/Olink/Number of EM PCA.png",width = 275*3,height = 175*3)
+# p
+# dev.off()
+# rm(sams,d,pca,d2,p,em_group,n_em,vars)
+# fviz_pca_biplot(pca,select.var=list(controb=15))
+
+p
+```

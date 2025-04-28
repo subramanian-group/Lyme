@@ -1,0 +1,642 @@
+---
+title: "Figure 2"
+editor_options: 
+  chunk_output_type: console
+format:
+  html:
+    warning: false     
+    message: false
+    cache: true
+    error: true
+    echo: true        
+    code-fold: true
+    code-tools: true
+---
+
+```{r libraries}
+#| echo: false
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  # Data wrangling and visualization
+  tidyverse, # Core data wrangling and plotting
+  ggrepel, # Repel overlapping text labels in ggplot2
+  ggstance, # Horizontal geoms for ggplot2
+  gghighlight, # Highlight ggplot2 layers based on conditions
+  ggnewscale, # Multiple color/size scales in ggplot2
+  patchwork, # Combine multiple ggplots
+  cowplot, # Additional plot layout tools
+  datapasta, # Paste dataframes directly into scripts
+  camcorder, # Review plot proportionality before saving
+  RColorBrewer, # Color palettes for plots
+  Hmisc, # Various utilities (summary stats, tables, plots)
+  ggpubr, # Publication-ready ggplot2 enhancements
+  ggplotify, # Convert plots into ggplot objects
+  # conflicted, # Manage function conflicts
+
+  # Bulk RNA-seq and statistical modeling
+  limma, # Linear models for microarray and RNA-seq
+  edgeR, # Differential expression for count data
+  DESeq2, # Differential expression for RNA-seq
+
+  # Enrichment analysis and gene sets
+  clusterProfiler, # GO/KEGG enrichment analysis
+  enrichR, # Enrichment analysis via web APIs
+  msigdbr, # Molecular Signatures Database (MSigDB) in R
+  DOSE, # Disease Ontology Semantic and Enrichment analysis
+  org.Hs.eg.db, # Human gene annotation database
+
+  # Heatmaps and Venn diagrams
+  ComplexHeatmap, # Advanced customizable heatmaps
+  pheatmap, # Simple heatmaps
+  VennDiagram, # Venn diagram drawing
+  UpSetR, # Set visualization (UpSet plots)
+  factoextra, # Visualization for multivariate data (PCA, clustering)
+
+  # Network and graph analysis
+  ggraph, # Graph/network visualization
+  tidygraph, # Tidy interface for graph data
+  igraph, # Core graph algorithms
+
+  # # Machine learning
+  # caret,             # Machine learning training and tuning
+  # glmnet,            # Elastic-net regression (lasso + ridge)
+  # e1071,             # SVM and other ML algorithms
+  # mice,              # Multivariate imputation of missing values
+  # matrixStats,       # Fast row/column computations
+  # progress,          # Progress bars for loops
+
+  # # Single-cell RNA-seq analysis
+  # DropletUtils,     # Handling droplet scRNA-seq outputs
+  # Seurat,           # Single-cell RNA-seq toolkit
+  # scater,           # SingleCellExperiment QC and plotting
+  # scuttle,          # Utilities for SingleCellExperiment objects
+  # SingleR,          # Automated cell type labeling
+  # celldex,          # Reference datasets for SingleR
+  # cellassign        # Probabilistic cell assignment (needs tensorflow)
+  # tensorflow,       # TensorFlow backend for deep learning (needed by cellassign)
+
+  # Table formatting and reports
+  # kableExtra,        # Enhanced tables in HTML and LaTeX
+  # officer,           # Create/edit Word and PowerPoint documents
+  # openxlsx,          # Read/write Excel files
+  datapasta # Copy-paste data into Excel
+)
+```
+
+```{r setup}
+#| eval: false
+
+# Resolve conflicts
+conflicts_prefer(dplyr::select,
+                 dplyr::filter,
+                 dplyr::slice,
+                 dplyr::rename,
+                 dplyr::desc)
+
+# Set a global theme and base size
+theme_set(
+  theme_minimal()
+)
+```
+
+```{r functions}
+fixNames = function(x){
+  x = gsub("\\..*","",x)
+  x = gsub("-","",x)
+  x = gsub("/.*","",x)
+  x = gsub("\\(.*","",x)
+  x = toupper(x)
+  alias = alias2SymbolTable(x)
+  x[!is.na(alias)] = alias[!is.na(alias)]
+  x
+}
+
+returnSigStars = function(x){
+  x2 = x
+  x2[is.numeric(x) & x > 0.05] = "ns"
+  x2[is.numeric(x) & x < 0.05] = "*"
+  x2[is.numeric(x) & x < 0.01] = "**"
+  x2[is.numeric(x) & x < 0.001] = "***"
+  x2[is.numeric(x) & x < 0.0001] = "****"
+  x2
+}
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+```
+
+```{r data}
+load("data/OlinkPreprocessed.RData")
+
+factors = data$sampleData[!is.na(data$sampleData$time), c("Subject_ID","time","days_post_ab")]
+colnames(factors) = c("Patient","Time","DaysPostAB")
+factors$Patient = as.factor(factors$Patient)
+factors$Time = as.factor(factors$Time)
+factors$Type = rep("p",dim(factors)[1])
+factors$Type[grep("^11|^21",rownames(factors))] = "c"
+factors$Type = as.factor(factors$Type)
+factors$naive = rep(F,dim(factors)[1])
+factors$naive[factors$Patient%in%unique(factors$Patient[factors$DaysPostAB==0])] = T
+levels(factors$Time) = c(levels(factors$Time),"TC")
+factors$Time[factors$Type=="c"] = "TC"
+factors$number_of_em = data$emData[rownames(factors),"Number_of_EM_at_Baseline"]
+factors$em_dimension = data$emData[rownames(factors),"largest_EM_Dimension"]
+factors$age = data$sampleData[rownames(factors),"Age_at_Time_of_Study_Entry"]
+factors$gender = data$sampleData[rownames(factors),"Gender"]
+factors$serology = data$sampleData[rownames(factors),"T1_lyme_disease_result"]
+factors = cbind(factors,data$sampleData[rownames(factors),c("Systolic","Diastolic","Pulse","BMI")])
+
+sams = data$sampleData$time%in%c("T1","T3","T4")&data$sampleData$days_of_prior_antibiotics==0&data$sampleData$Condition=="Patient"
+direct = data$directSymptoms[sams,]
+
+```
+
+```{r olink_DE_1}
+#| fig-cap: "Figure 2a"
+#| fig-alt: "Pairwise DE Heatmap.png"
+#| fig-height: 33.33
+#| fig-width: 10.42
+
+# Pairwise DE ----
+times = c("T1","T2","T3","T4")
+timeComps = list()
+for(i in 1:length(times)){
+  for(j in 1:length(times)){
+    if(i!=j&i<j){
+      timeComps[[length(timeComps)+1]] = c(times[i],times[j])
+      names(timeComps)[length(timeComps)] = paste0(times[i],"-",times[j])
+    }
+  }
+}
+
+proteins = colnames(data$assayData)
+
+pFrame = data.frame(proteins = proteins)
+adj_pFrame = data.frame(proteins = proteins)
+logFCFrame = data.frame(proteins = proteins)
+
+rownames(pFrame) = proteins
+rownames(adj_pFrame) = proteins
+rownames(logFCFrame) = proteins
+
+de_list = list()
+fit_list = list()
+
+for(i in 1:length(timeComps)){
+  comparison = timeComps[[i]]
+  naive = c(TRUE)
+  type = c("p")
+  
+  factorSub = factors[factors$Type%in%type&factors$Time%in%comparison&factors$naive%in%naive,]
+  factorSub = lapply(factorSub,FUN = factor)
+  ids = paste0(factorSub$Patient," ",factorSub$Time)
+  
+  patient = factorSub$Patient
+  time = factorSub$Time
+  naive = factorSub$naive
+  type = factorSub$Type
+  daysPostAB = factorSub$DaysPostAB
+  age = data$sampleData[ids,"Age_at_Time_of_Study_Entry"]
+  sero = data$sampleData[ids,"T1_lyme_disease_result"]
+  gender = data$sampleData[ids,"Gender"]
+  
+  # if(!"T2"%in%comparison){
+  #   systolic = data$sampleData[ids,"Sytolic"]
+  #   diastolic = data$sampleData[ids,"Diastolic"]
+  #   pulse = data$sampleData[ids,"Pulse"]
+  #   bmi = data$sampleData[ids,"BMI"]
+  #   
+  #   mm = model.matrix(~0+patient+time+age+sero+gender+systolic+diastolic+pulse+bmi)
+  # }else{
+  mm = model.matrix(~0+patient+time+age+sero+gender)
+  # }
+  
+  fit <- lmFit(t(data$assayData[paste0(as.character(patient)," ",as.character(time)),]),mm)
+  fit <- eBayes(fit)
+  
+  fit_list[[i]] = fit
+  
+  top = limma::topTable(fit, coef=paste0("time",comparison[2]),number = Inf)
+  
+  de_list[[i]] = top
+  
+  top = top[proteins,]
+  
+  pFrame[,names(timeComps)[i]] = top$P.Val
+  adj_pFrame[,names(timeComps)[i]] = top$adj.P.Val
+  logFCFrame[,names(timeComps)[i]] = top$logFC
+}
+names(de_list) = unlist(lapply(timeComps, paste, collapse = "-"))
+names(fit_list) = unlist(lapply(timeComps, paste, collapse = "-"))
+
+#Clean up differential expression results ~~~~~~~
+
+logFCFrame = logFCFrame[,-1]
+pFrame = pFrame[,-1]
+adj_pFrame = adj_pFrame[,-1]
+pairwise = list(logFC = logFCFrame, p = pFrame, p.adj = adj_pFrame)
+logFCFrame = logFCFrame[!apply(adj_pFrame,MARGIN = 1,function(x) sum(x<.05) == 0),]
+logFCFrame = logFCFrame[order(rowSums(logFCFrame,na.rm = T),decreasing = T),]
+adj_pFrame = adj_pFrame[rownames(logFCFrame), colnames(logFCFrame)]
+rownames(logFCFrame) = gsub("\\.", " ", rownames(logFCFrame))
+rownames(adj_pFrame) = gsub("\\.", " ", rownames(adj_pFrame))
+panel = data$featureData$panel[match(rownames(logFCFrame),data$featureData$protein)]
+rownames(logFCFrame) = make.unique(fixNames(rownames(logFCFrame)))
+rownames(adj_pFrame) = make.unique(fixNames(rownames(adj_pFrame)))
+
+# Heatmap ----
+col_fun = circlize::colorRamp2(c(-1.5, 0, 1.5), c("blue", "white","red"))
+
+cell_fun = function(j, i, x, y, width, height, fill) {
+  txt = returnSigStars(adj_pFrame[i, j])
+  if(txt=="ns")txt = ""
+  grid.text(txt, x, y, gp = gpar(fontsize = 32),vjust=.8)
+}
+hc1 = hclust(dist(-1*logFCFrame),method = "ward.D2")
+infimm_clust = paste0("c",cutree(hc1,2))
+infimm_clust[infimm_clust=="c1"] = 'fast'
+infimm_clust[infimm_clust=="c2"] = 'slow'
+names(infimm_clust) = rownames(logFCFrame)
+pairwise$cluster = rep("none",nrow(pairwise$logFC))
+pairwise$cluster[names(infimm_clust)] = infimm_clust
+rowanno = rowAnnotation(cluster = infimm_clust,
+                        col=list(cluster=c(fast="#F8766D",slow="#00BFC4")),
+                        annotation_name_gp = gpar(fontsize=32),
+                        # width = unit(5000,"cm"),
+                        simple_anno_size = unit(1,"cm"),
+                        annotation_legend_param = list(legend_width=unit(10,"cm"),
+                                                       labels_gp=gpar(fontsize=32),
+                                                       grid_height = unit(15, "mm"),
+                                                       grid_width = unit(15, "mm"),
+                                                       title_gap = unit(30, "mm"),
+                                                       title_position = "topcenter",
+                                                       title_gp = gpar(fontsize = 32, fontface = "bold")))
+hm = Heatmap(matrix = -1*logFCFrame,
+             cluster_columns = F,
+             cell_fun = cell_fun,
+             col = col_fun,
+             cluster_rows = hc1,
+             left_annotation = rowanno,
+             row_names_gp = gpar(fontsize=24),
+             column_names_gp = gpar(fontsize=32),
+             heatmap_legend_param = list(title="logFC",legend_height=unit(10,"cm"),
+                                         title_gap = unit(300, "mm"),
+                                         legend_height=unit(5,"mm"),
+                                         legend_width=unit(80,"mm"),
+                                         legend_direction = "horizontal",
+                                         labels_gp=gpar(fontsize=32),
+                                         grid_height = unit(5, "mm"),
+                                         grid_width = unit(80, "mm"),
+                                         title_position = "topcenter",
+                                         title_gp = gpar(fontsize = 32, fontface = "bold")),
+             name = "logFC")
+# hm = ComplexHeatmap::draw(hm,padding=unit(c(1, 1, 1, 1.5), "cm"),heatmap_legend_side="bottom")
+# hm
+# png("./figures_final/Olink/Pairwise DE Heatmap.png",width = 250*3,height=800*3)
+# hm
+# dev.off()
+
+#rm("hm","hc1","infimm_clust","rowanno","mm")
+
+rm("hc1","infimm_clust","rowanno","mm")
+
+hm = ComplexHeatmap::draw(hm,padding=unit(c(1, 1, 1, 1.5), "cm"),heatmap_legend_side="bottom")
+```
+
+```{r olink_GSEA_1}
+#| fig-cap: "Figure 2b"
+#| fig-alt: "GSEA Results Heatmap.png"
+#| fig-height: 29.17
+#| fig-width: 14.58
+
+# remotes::install_version("msigdbr", version = "7.5.1")
+library(msigdbr)
+
+background = rownames(pairwise$p)
+m_df = msigdbr(species = "Homo sapiens")
+m_df = as.data.frame(m_df)
+m_t2g = m_df[m_df$gs_cat%in%c("H","C2","C5","C7"),c("gs_name","human_gene_symbol")]
+m_t2g = m_df[m_df$gs_cat%in%c("C5")&m_df$gs_subcat%in%c("GO:BP","CP:REACTOME","CP:WIKIPATHWAYS","CP:KEGG"),c("gs_name","human_gene_symbol")]
+m_t2g = m_df[m_df$gs_cat%in%c("H","C5"),c("gs_name","human_gene_symbol")]
+m_t2g = m_t2g[m_t2g[,"human_gene_symbol"]%in%background,]
+
+geneList = 1-pairwise$p$`T1-T2`
+names(geneList) = rownames(pairwise$logFC)
+geneList = sort(geneList,decreasing = T)
+gseaRes12 = clusterProfiler::GSEA(geneList, TERM2GENE = m_t2g)
+
+geneList = 1-pairwise$p$`T1-T3`
+names(geneList) = rownames(pairwise$logFC)
+geneList = sort(geneList,decreasing = T)
+gseaRes13 = clusterProfiler::GSEA(geneList, TERM2GENE = m_t2g)
+
+geneList = 1-pairwise$p$`T1-T4`
+names(geneList) = rownames(pairwise$logFC)
+geneList = sort(geneList,decreasing = T)
+gseaRes14 = clusterProfiler::GSEA(geneList, TERM2GENE = m_t2g)
+
+t12 = dotplot(gseaRes12,font.size = 7,label_format = 10)$data
+# t13 = dotplot(gseaRes13,font.size = 7,label_format = 10)$data
+t14 = dotplot(gseaRes14,font.size = 7,label_format = 10)$data
+t12$comparison = "T1-T2"
+# t13$comparison = "T1-T3"
+t14$comparison = "T1-T4"
+
+d = do.call(rbind,list(t12,#t13,
+                       t14))
+d$ID = gsub("_"," ",d$ID)
+d$ID = factor(d$ID,levels = unique(c(d$ID[d$comparison=="T1-T2"],#d$ID[d$comparison=="T1-T3"],
+                                     d$ID[d$comparison=="T1-T4"])),ordered = T)
+
+p = ggplot(d,aes(x=comparison,y=ID))+
+  geom_tile(aes(fill=p.adjust))+
+  scale_colour_gradient(aesthetics = 'fill',guide="colorbar")+
+  scale_y_discrete(labels = function(x) lapply(strwrap(x, width = 25, simplify = FALSE), paste, collapse="\n"))+
+  guides(fill=guide_colorbar(title="adjusted\np value"))+
+  theme_minimal(base_size = 35)+
+  theme(
+    legend.key.size = unit(35,'pt'),
+    legend.text = element_text(size = 25),
+    legend.title = element_text(size=30),
+    axis.text.x = element_text(size=32,angle = 90),
+        axis.text.y = element_text(size=24),
+    axis.title = element_blank())
+p
+
+# png("./figures_final/Olink/GSEA Results Heatmap.png",width = 350*3,height = 700*3)
+# p
+# dev.off()
+# rm(p,t12,t14,t13,geneList,gseaRes12,gseaRes13,gseaRes14,m_t2g,m_df,background,d)
+```
+
+```{r olink_DE_2}
+#| fig-cap: "Figure 2c"
+#| fig-alt: "Pairwise DE Heatmap.png"
+#| fig-height: 16.67
+#| fig-width: 12.5
+
+# New Olink Data
+
+# Pairwise DE ----
+
+d = na.omit(as.matrix(data$olinkNewFail[sams,]))
+colnames(d) = fixNames(colnames(d))
+
+
+time = data$sampleData[rownames(d),"time"]
+id = gsub(" T.$","",rownames(d))
+groups = factor(time,levels = c("T1","T3"))
+design = model.matrix(~0+groups+id)
+colnames(design) = gsub("groups","",colnames(design))
+fit <- lmFit(t(d),design)
+
+cont = makeContrasts(
+  T13 = T1-T3,
+  levels = design
+)
+fit2 = contrasts.fit(fit, cont)
+fit2 = eBayes(fit2)
+topNew = limma::topTable(fit2,adjust.method = "BH",number = Inf,p.value = 1)
+
+
+# save(list = c("pairwise","topNew","data","topAll"),file = "./Data/Prospective/Processed/olink_results_new.RData")
+
+# Heatmap ----
+
+sig = topNew$ID[topNew$adj.P.Val<0.05]
+filt = data$sampleData$days_of_prior_antibiotics==0&data$sampleData$time%in%c("T1","T3")&data$sampleData$Condition=="Patient"
+pd = data$sampleData[filt,]
+d = data$olinkNewFail[filt,match(sig,fixNames(colnames(data$olinkNewFail)))]
+dn = dimnames(d)
+d = apply(d,2,scale)
+dimnames(d) = dn
+col_fun = circlize::colorRamp2(c(-2.5, 0, 2.5), c("blue", "white","red"))
+col_fun2 = circlize::colorRamp2(c(-2, 0, 2), c(gg_color_hue(2)[2], "white",gg_color_hue(2)[1]))
+
+# cell_fun = function(j, i, x, y, width, height, fill) {
+#   txt = returnSigStars(adj_pFrame[i, j])
+#   if(txt=="ns")txt = ""
+#   grid.text(txt, x, y, gp = gpar(fontsize = 18),vjust=.8)
+# }
+rs = rep("Up",ncol(d))
+rs[colnames(d)%in%c("GDF-2","APLP1")] = "Down"
+
+olNew_lfc = as.numeric(topNew$logFC[match(sig,topNew$ID)])
+names(olNew_lfc) = colnames(d)
+rowanno = HeatmapAnnotation(logFC = anno_simple(olNew_lfc, 
+                                            col = col_fun2,
+                                            pch = returnSigStars(topNew$adj.P.Val[match(sig,topNew$ID)]),
+                                            which = "row",
+                                            pt_size = unit(rep(36,length(sig)), "pt"),
+                                            width = unit(1.75,"cm")),
+                            which = 'row',
+                        annotation_name_gp = gpar(fontsize=32))
+lgd_lfc = Legend(title = "logFC", col_fun = col_fun2, 
+                 at = c(-2,-1,0,1,2),
+                 legend_height=unit(5,"mm"),
+                 legend_width=unit(40,"mm"),
+                 labels_gp=gpar(fontsize=32),
+                 grid_height = unit(5, "mm"),
+                 direction = "horizontal",
+                 grid_width = unit(40, "mm"),
+                 title_position = "topcenter",
+                 title_gp = gpar(fontsize = 32, fontface = "bold"))
+
+hm = Heatmap(matrix = as.matrix(t(d)),
+             cluster_columns = T,
+             left_annotation = rowanno,
+             # cell_fun = cell_fun,
+             column_split = pd$time,
+             row_split = rs,
+             col = col_fun,
+             cluster_rows = T,
+             row_names_gp = gpar(fontsize=24),
+             column_title_gp = gpar(fontsize=24),
+             row_title_gp = gpar(fontsize=24),
+             show_column_names = F,
+             column_names_gp = gpar(fontsize=32),
+             heatmap_legend_param = list(title="z-score",legend_height=unit(10,"cm"),
+                                         legend_height=unit(5,"mm"),
+                                         legend_width=unit(40,"mm"),
+                                         labels_gp=gpar(fontsize=32),
+                                         grid_height = unit(5, "mm"),
+                                         legend_direction = "horizontal",
+                                         grid_width = unit(40, "mm"),
+                                         title_position = "topcenter",
+                                         title_gp = gpar(fontsize = 32, fontface = "bold")),
+             name = "z-score")
+hm = ComplexHeatmap::draw(hm,padding=unit(c(1, 1, 1, 1.5), "cm"),
+                          annotation_legend_list = list(lgd_lfc),
+                          annotation_legend_side="bottom",
+                          heatmap_legend_side="bottom",
+                          merge_legends=T)
+# hm
+# 
+# png("./figures_final/Olink New/Pairwise DE Heatmap.png",width = 300*3,height=400*3)
+# hm
+# dev.off()
+
+hm
+```
+
+```{r olink_angiopoetin}
+#| fig-cap: "Figure 2d"
+#| fig-alt: "Olink_Boxplot_Angiopoetin1_2.png"
+#| fig-height: 8.33
+#| fig-width: 12.5
+
+filt = data$sampleData$time%in%c("T1","T3")&data$sampleData$days_of_prior_antibiotics==0&data$sampleData$Condition=="Patient"
+prots = c("ANGPT1","ANGPT2"#,"PDGF subunit B","GDF-2"
+          )
+d = data$olinkNewFail[filt,prots]
+sd = data$sampleData[filt,]
+d = cbind(d,sd) %>% pivot_longer(cols = all_of(prots),names_to = "Protein")
+
+d <- d |> mutate(time = time |> factor(levels = c("T1", "T3")))
+
+p = ggplot(d,aes(x=time,y=value, color = time))+
+  geom_boxplot(outlier.shape = NA,size=1.5)+
+  geom_point(alpha=.5,size=3)+
+  geom_line(aes(group=Subject_ID), color = "grey20", size=1.5,alpha=.5)+
+  facet_wrap(vars(Protein),scales = "free_y", ncol = 1)+
+  theme_minimal(base_size = 32) +
+  theme(legend.position = "none")
+
+# png("figures_final/Metabalon/Olink_Boxplot_Angiopoetin1_2.png",width = 900,height = 600)
+# print(p)
+# dev.off()
+
+p
+```
+
+```{r heirarchical_edge_bundle}
+#| fig-cap: "Figure 2e"
+#| fig-alt: "Hierarchical EB Symptoms.png"
+#| fig-height: 8.33
+#| fig-width: 20
+
+# pacman::p_load(ggraph,tidygraph,purrr,rlang,tidyverse,igraph)
+
+filt = data$sampleData$days_post_ab==0&data$sampleData$Condition=="Patient"
+
+all_na = function(x){sum(is.na(x))==length(x)}
+filt[apply(data$assayData[filt,],1,all_na)] = F
+filt[apply(data$olinkNew[filt,],1,all_na)] = F
+
+# syms = colnames(data$directSymptoms)[colSums(data$directSymptoms[filt,]>0)>5]
+
+syms <- data$directSymptoms %>%
+  filter(filt) %>%
+  summarise(across(everything(), ~ sum(. > 0, na.rm = TRUE))) %>%
+  select(where(~ .x > 5)) %>%
+  colnames()
+
+ad = data$assayData[filt,]
+s = data$directSymptoms[filt,syms]
+s$Symptom.Score = rowSums(s/(length(syms)*max(data$directSymptoms,na.rm = T)))
+syms = c(syms,"Symptom.Score")
+sd = data.frame(Age = data$sampleData[filt,c("Age_at_Time_of_Study_Entry")],
+                BMI = data$sampleData[filt,c("BMI")],
+                Pulse = data$sampleData[filt,c("Pulse")],
+                Systolic = data$sampleData[filt,c("Systolic")],
+                Diastolic = data$sampleData[filt,c("Diastolic")]
+)
+em = data.frame(`Number of EM` = data$emData$Number_of_EM_at_Baseline[filt],
+                `Largest EM Dimension` = data$emData$largest_EM_Dimension[filt])
+syms = c(syms,"Age","BMI","Pulse","Systolic","Diastolic","Number of EM","Largest EM Dimension")
+d = cbind(ad,s,sd,em)
+c = rcorr(as.matrix(d),type = 'spearman')
+c = rcorr(as.matrix(d))
+r = as.data.frame(c$r)
+p = as.data.frame(c$P)
+r_long = rownames_to_column(r) %>% pivot_longer(cols = -rowname)
+p_long = rownames_to_column(p) %>% pivot_longer(cols = -rowname)
+r_long = r_long[p_long$value<0.05,]
+r_long = r_long[abs(r_long$value)>0.6,]
+r_long = r_long[!is.na(r_long[,1]),]
+r_long = as.data.frame(r_long)
+r_long = r_long[!r_long$name%in%colnames(ad),]
+r_long = r_long[!r_long$rowname%in%syms,]
+colnames(r_long)[1:2] = c('from','to')
+sub = unique(c(r_long$from,r_long$to))
+r2 = r[sub,sub]
+r_long$from = gsub("\\."," ",r_long$from)
+r_long$to = gsub("\\."," ",r_long$to)
+rownames(r2) = gsub("\\."," ",rownames(r2))
+colnames(r2) = gsub("\\."," ",colnames(r2))
+syms = gsub("\\."," ",syms)
+
+# png("forNaeha/Olink Symptom Correlation Network T1.png",width=900,height=400)
+# pheatmap(r2[rownames(r2)%in%syms,!colnames(r2)%in%syms])
+# dev.off()
+
+# set_graph_style(plot_margin = margin(1,1,1,1))
+
+hc = hclust(dist(r2))
+
+# k = 9
+# cut = cutree(hc,k=k)
+# cut2 = rep(k+1,length(syms))
+# names(cut2) = syms
+# cut = c(cut,cut2)
+# k = k+1
+k = 5
+cut = cutree(hc,k=k)
+d1 = data.frame(from="origin", to=paste("group", seq(1,k), sep=""))
+d2 = data.frame(from=paste0("group",cut), to=names(cut))
+edges = rbind(d1, d2)
+
+connect = r_long
+
+vertices  <-  data.frame(
+  name = unique(c(as.character(edges$from), as.character(edges$to)))
+) 
+vertices$group  <-  edges$from[ match( vertices$name, edges$to ) ]
+vertices$type = rep('Protein',nrow(vertices))
+vertices$type[vertices$name%in%syms] = "Symptom"
+
+mygraph <- igraph::graph_from_data_frame(edges, vertices=vertices)
+from  <-  match( connect$from, vertices$name)
+to  <-  match( connect$to, vertices$name)
+value = connect$value
+
+get_angle = function(x){
+  x[x>90&x<270] = x[x>90&x<270]-180
+  x
+}
+
+# pal = gg_color_hue(k+2)
+# pal[(k+1):(k+2)] = c('grey39','black')
+pal = c('grey39','black')
+p = ggraph(mygraph, layout = 'dendrogram', circular = TRUE) + 
+  geom_node_point(aes(filter = leaf, x = x*1.05, y=y*1.05,color=group),show.legend = F,size=8,color='black') +
+  geom_conn_bundle(data = get_con(from = from, to = to,value=value),
+                   aes(color=value,alpha = abs(value), width = abs(value)), tension = .9) +
+  scale_edge_width(range = c(1,12))+
+  scale_edge_colour_distiller(palette = "RdBu",direction=-1, limits=c(-1,1)) + 
+  geom_node_text(aes(x = x*1.1, y=y*1.1,filter = leaf, angle = get_angle(node_angle(x, y)), label = name, color = type),
+                 hjust = 'outward', size = 12,show.legend = F)+
+  scale_color_manual(values = pal)+
+  expand_limits(x = c(-2, 1.6), y = c(-2, 1.6)) +
+  theme_void() +
+  theme(
+    legend.key.size = unit(40,'pt'),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size=22),
+    legend.position = "left",
+    plot.margin=unit(c(1,1,1,1),"cm"),
+  )
+# dev.off()
+# p
+
+# png(filename = "./figures_final/Olink/Hierarchical EB Symptoms.png",width = 1440,height = 1280)
+# p
+# dev.off()
+
+# rm(filt,all_na,syms,ad,s,em,sd,d,r,p,c,r_long,p_long,hc,cut,d1,d2,edges,vertices,pal,breaks,breaksList,mygraph,from,to,value,connect)
+
+p
+```

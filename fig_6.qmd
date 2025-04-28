@@ -1,0 +1,410 @@
+---
+title: "Untitled"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  library(tidyverse),
+  library(patchwork),
+  library(limma),
+  library(ComplexHeatmap),
+  library(clusterProfiler),
+  library(Hmisc),
+  library(ggraph),
+  library(mice),
+  library(ggpubr)
+)
+```
+
+```{r}
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+```
+
+```{r}
+load("Data/All/Data.RData")
+```
+
+##### Olink Radar Plot
+
+```{r}
+rm(scale)
+d = data$assayData %>% mutate_all(.,scale)
+d[d>5] = 5
+
+order <- colnames(d)[order(unlist(d["201455 T1", ]))]
+sd = data$sampleData
+d = d[sd$Condition=="Patient"&sd$days_post_ab==0,]
+sd = sd[rownames(d),]
+d = cbind(d,sd)
+df = pivot_longer(d,cols = all_of(order),names_to = "protein",values_to = "value")
+df$protein = factor(df$protein,levels=order)
+# df$color = df$sample=="201455 T1"
+df$color = rep('N',nrow(df))
+df$color[df$sample=="201455 T1"] = 'Y'
+df = df[!is.na(df$value),]
+
+
+sequence_length = length(unique(df$protein))
+first_sequence = c(1:(sequence_length%/%2)) 
+second_sequence = c((sequence_length%/%2+1):sequence_length) 
+first_angles = c(90 - 180/length(first_sequence) * first_sequence)
+second_angles = c(-90 - 180/length(second_sequence) * second_sequence)
+angles = c(first_angles,second_angles)
+label_data = data.frame(protein=levels(df$protein),value=rep(6,length(levels(df$protein))),angle = angles,hjust = ifelse(angles < -90, 1, 0))
+
+p = ggplot(df,aes(x=protein,y=value))+
+  geom_boxplot(size=2)+
+  geom_line(aes(group = sample, color=color,size=3),show.legend = F)+
+  scale_color_manual(values = c(Control = gg_color_hue(2)[1],Patient = gg_color_hue(2)[2],N = rgb(0,0,0,0),Y = 'blue'))+
+   geom_text(data = label_data,aes(label=protein,hjust=hjust), color="black", fontface="bold",alpha=0.6, size=2.5, angle = label_data$angle, inherit.aes = T)+
+  # geom_boxplot(aes(color=Condition),)+
+  # geom_boxplot(aes(col=Condition),outlier.shape = NA)+
+  scale_y_continuous(limits = c(-max(abs(range(df$value,na.rm = T))),max(abs(range(df$value,na.rm = T)))),
+                     expand = c(0, 0),
+                     oob = scales::oob_squish)+
+  coord_polar(clip='off')+
+  theme_minimal()+
+  # ylim(-max(abs(range(df$value,na.rm = T))),max(abs(range(df$value,na.rm = T))))+
+  labs(x=element_blank(),y=element_blank())+
+  theme_minimal(base_size = 48)+
+  # theme(axis.text.x = element_text(angle = angles))+
+  theme(axis.text = element_blank(),
+    axis.title = element_blank())
+    # panel.grid.major.x = element_blank())
+    # panel.grid = element_blank(),
+    # plot.margin = unit(rep(0,4), "cm"))+
+  # scale_y_continuous(breaks = c(-5,-2.5,0,2.5,5))
+  # ylim(-max(abs(range(df$value,na.rm = T))),max(abs(range(df$value,na.rm = T))),)
+p
+png("figures_final/Outliers/Olink 35 EM Radar.png",width = 3000,height = 3000)
+print(p)
+dev.off()
+```
+
+##### Gated
+
+```{r}
+outliers = list.files("./data/Flow/outlier flow subsets/",full.names = T,pattern = "outliers.RData")
+for(i in 1:length(outliers)){
+  load(outliers[i])
+}
+outliers = list(mono=mono,dcnk=dcnk,bcell=bcell,tcell=tcell)
+rm(mono,dcnk,bcell,tcell)
+
+
+gatePlot = function(sce,x,y,
+                    xmin,xmax,
+                    ymin,ymax,
+                    ids,
+                    assay = 'counts',
+                    orient= 'center',
+                    nudge_x = .05,
+                    nudge_y = .05){
+  keep = sce$sample_id%in%ids
+  id = sce$sample_id[keep]
+  # cluster = sce@colData[keep,cluster_col]
+  d = data.frame(t(assay(sce,assay))[keep,c(x,y)],
+                 # population=cluster,
+                 id=id)
+  fact = factor(d$id)
+  summary = lapply(split(d,fact),function(df){
+    percent = sum(df[,x]>xmin&
+                    df[,x]<xmax&
+                    df[,y]>ymin&
+                    df[,y]<ymax)/nrow(df)*100
+    percent = round(percent,2)
+  })
+  xr = c(xmin,xmax)
+  yr = c(ymin,ymax)
+  if(orient =='center'){
+    xo = mean(xr)
+    yo = mean(yr)
+  }else if(orient == 'topleft'){
+    xo = xr[1]+nudge_x*(xr[2]-xr[1])
+    yo = yr[2]-nudge_y*(yr[2]-yr[1])
+  }else if(orient == 'topright'){
+    xo = xr[2]-nudge_x*(xr[2]-xr[1])
+    yo = yr[2]-nudge_y*(yr[2]-yr[1])
+  }else if(orient == 'bottomleft'){
+    xo = xr[1]+nudge_x*(xr[2]-xr[1])
+    yo = yr[1]+nudge_y*(yr[2]-yr[1])
+  }else if(orient == 'bottomleft'){
+    xo = xr[2]-nudge_x*(xr[2]-xr[1])
+    yo = yr[1]+nudge_y*(yr[2]-yr[1])
+  }
+  summary = data.frame(id = names(summary),
+                       percent = paste0(as.numeric(summary),"%"),
+                       x = xo,
+                       y = yo)
+  rect = data.frame(xmin = xmin,
+                    xmax=xmax,
+                    ymin=ymin,
+                    ymax=ymax,
+                    id = ids,
+                    x=1,
+                    y=1)
+  colnames(rect)[6:7] = c(x,y)
+  ggplot(d,aes_string(x=x,y=y))+
+    geom_point(cex=.2)+
+    stat_density_2d(aes(fill = ..level..), 
+                    geom = "polygon",
+                    contour_var = 'ndensity',
+                    alpha = .25) +
+    facet_wrap(vars(id),nrow=1)+
+    scale_fill_viridis(option = "C")+
+    # annotate("rect",xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax)+
+    geom_rect(data = rect,aes(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax),fill=NA,col='black',size=1.2)+
+    geom_label(data = summary,mapping = aes(x = x,y = y,label = percent),size=8)+
+    theme_minimal(base_size = 40)+
+    theme(legend.key.size = unit(20,'mm'))
+}
+
+
+plotList = list()
+# Mono CD14 CD16
+sce = outliers$mono
+x = "CD16"
+y = "CD14"
+xmin = 3
+xmax = 7.2
+ymin = 3.5
+ymax = 6.9
+ids = as.character(unique(sce$sample_id))
+plotList$Monocyte = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topleft',nudge_x = .25,nudge_y = .15)
+
+# T Cell CD4 CD8
+sce = outliers$tcell
+x = "CD4"
+y = "CD8"
+ids = as.character(unique(sce$sample_id))
+xmin = 0
+xmax = 2
+ymin = -1.5
+ymax = 1
+plotList$TCell_top = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topright',nudge_x = -.25,nudge_y = -.12)
+
+# T Cell CD11c CD123
+sce = outliers$tcell
+# keep = grep("CD4",sce@metadata$clusters$main_mem)
+keep = data.frame(t(assay(outliers$tcell,'counts'))[,c("CD4","CD8")])
+keep = keep$CD4>0&keep$CD4<2&keep$CD8>-1.5&keep$CD8<1
+sce = sce[,keep]
+sce@metadata$clusters = sce@metadata$clusters[keep,]
+x = "CD45RO"
+y = "CCR7"
+ids = as.character(unique(sce$sample_id))
+xmin = -4.5
+xmax = -2
+ymin = -3
+ymax = -.5
+plotList$TCell_effector = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topleft',nudge_x = .25,nudge_y = .12)
+
+p = ggarrange(plotlist = plotList,nrow = length(plotList),common.legend = T,legend = 'right')
+
+# png("./figures_final/Outliers/Flow Plots 33EM.png",width=400*3,height=300*4.5)
+# p
+# dev.off()
+
+p
+```
+
+##### Gated 2
+
+```{r eval=F}
+outliers = list.files("./Data/Flow/outlier flow subsets/",full.names = T,pattern = "outliers2.RData")
+for(i in 1:length(outliers)){
+  load(outliers[i])
+}
+outliers = list(mono=mono,dcnk=dcnk,bcell=bcell,tcell=tcell)
+rm(mono,dcnk,bcell,tcell)
+
+
+gatePlot = function(sce,x,y,
+                    xmin,xmax,
+                    ymin,ymax,
+                    ids,
+                    assay = 'counts',
+                    orient= 'center',
+                    nudge_x = .05,
+                    nudge_y = .05){
+  keep = sce$sample_id%in%ids
+  id = sce$sample_id[keep]
+  # cluster = sce@colData[keep,cluster_col]
+  d = data.frame(t(assay(sce,assay))[keep,c(x,y)],
+                 # population=cluster,
+                 id=id)
+  fact = factor(d$id)
+  summary = lapply(split(d,fact),function(df){
+    percent = sum(df[,x]>xmin&
+                    df[,x]<xmax&
+                    df[,y]>ymin&
+                    df[,y]<ymax)/nrow(df)*100
+    percent = round(percent,2)
+  })
+  xr = c(xmin,xmax)
+  yr = c(ymin,ymax)
+  if(orient =='center'){
+    xo = mean(xr)
+    yo = mean(yr)
+  }else if(orient == 'topleft'){
+    xo = xr[1]+nudge_x*(xr[2]-xr[1])
+    yo = yr[2]-nudge_y*(yr[2]-yr[1])
+  }else if(orient == 'topright'){
+    xo = xr[2]-nudge_x*(xr[2]-xr[1])
+    yo = yr[2]-nudge_y*(yr[2]-yr[1])
+  }else if(orient == 'bottomleft'){
+    xo = xr[1]+nudge_x*(xr[2]-xr[1])
+    yo = yr[1]+nudge_y*(yr[2]-yr[1])
+  }else if(orient == 'bottomleft'){
+    xo = xr[2]-nudge_x*(xr[2]-xr[1])
+    yo = yr[1]+nudge_y*(yr[2]-yr[1])
+  }
+  summary = data.frame(id = names(summary),
+                       percent = paste0(as.numeric(summary),"%"),
+                       x = xo,
+                       y = yo)
+  rect = data.frame(xmin = xmin,
+                    xmax=xmax,
+                    ymin=ymin,
+                    ymax=ymax,
+                    id = ids,
+                    x=1,
+                    y=1)
+  colnames(rect)[6:7] = c(x,y)
+  ggplot(d,aes_string(x=x,y=y))+
+    geom_point(cex=.2)+
+    stat_density_2d(aes(fill = ..level..), 
+                    geom = "polygon",
+                    contour_var = 'ndensity',
+                    alpha = .25) +
+    facet_wrap(vars(id),nrow=1)+
+    scale_fill_viridis(option = "C")+
+    # annotate("rect",xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax)+
+    geom_rect(data = rect,aes(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax),fill=NA,col='black',size=1.2)+
+    geom_label(data = summary,mapping = aes(x = x,y = y,label = percent),size=8)+
+    theme_minimal(base_size = 40)+
+    theme(legend.key.size = unit(20,'mm'))
+}
+
+
+plotList = list()
+# Mono CD14 CD16
+sce = outliers$mono
+x = "CD16"
+y = "CD14"
+xmin = 3
+xmax = 7.2
+ymin = 3.5
+ymax = 6.9
+ids = as.character(unique(sce$sample_id))
+plotList$Monocyte = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topleft',nudge_x = .25,nudge_y = .15)
+
+# T Cell CD4 CD8
+sce = outliers$tcell
+x = "CD4"
+y = "CD8"
+ids = as.character(unique(sce$sample_id))
+xmin = 0
+xmax = 2
+ymin = -1.5
+ymax = .8
+plotList$TCell_top = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topright',nudge_x = -.25,nudge_y = -.12)
+
+# T Cell CD11c CD123
+sce = outliers$tcell
+# keep = grep("CD4",sce@metadata$clusters$main_mem)
+keep = data.frame(t(assay(outliers$tcell,'counts'))[,c("CD4","CD8")])
+keep = keep$CD4>0&keep$CD4<2&keep$CD8>-1.5&keep$CD8<1
+sce = sce[,keep]
+sce@metadata$clusters = sce@metadata$clusters[keep,]
+x = "CD45RO"
+y = "CCR7"
+ids = as.character(unique(sce$sample_id))
+xmin = -4.5
+xmax = -2
+ymin = -3
+ymax = -.5
+plotList$TCell_effector = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topleft',nudge_x = .25,nudge_y = .12)
+
+# T Cell
+sce = outliers$tcell
+# keep = grep("CD4",sce@metadata$clusters$main_mem)
+keep = data.frame(t(assay(outliers$tcell,'counts'))[,c("CD4","CD8")])
+keep = keep$CD4>0&keep$CD4<2&keep$CD8>-1.5&keep$CD8<1
+sce = sce[,keep]
+sce@metadata$clusters = sce@metadata$clusters[keep,]
+x = "TBET"
+y = "GATA3"
+ids = as.character(unique(sce$sample_id))
+xmin = .2
+xmax = 3
+ymin = -2.5
+ymax = 6
+plotList$TCell_effector_type = gatePlot(sce,x,y,xmin,xmax,ymin,ymax,ids,assay = 'counts',orient = 'topleft',nudge_x = .25,nudge_y = .12)
+
+
+p = ggarrange(plotlist = plotList,nrow = length(plotList),common.legend = T,legend = 'right')
+
+# png("./figures_final/Outliers/Flow Plots 33EM -- 2.png",width=600*3,height=300*4.5)
+# p
+# dev.off()
+
+p
+```
+
+##### Activated Subsets
+
+######  Mono -- 2
+
+```{r}
+outliers = list.files("./data/Flow/outlier flow subsets",full.names = T,pattern = "outliers2.RData$")
+for(i in 1:length(outliers)){
+  load(outliers[i])
+}
+outliers = list(mono=mono,dcnk=dcnk,bcell=bcell,tcell=tcell)
+rm(mono,dcnk,bcell,tcell)
+
+plot_flow_activation = function(sce,x,y,z,ids,assay = 'counts',max_dev = 5){
+  keep = sce$sample_id%in%ids
+  id = sce$sample_id[keep]
+  # cluster = sce@colData[keep,cluster_col]
+  d = data.frame(t(assay(sce,assay))[keep,c(x,y,z)],
+                 # population=cluster,
+                 id=id)
+  d = pivot_longer(d,z,names_to = "activation",values_to = "z")
+  d$z[d$z>max_dev] = max_dev
+  d$z[d$z<(-1*max_dev)] = -1*max_dev
+  ggplot(d,aes_string(x=x,y=y,color="z"))+
+    geom_point(stroke=0,cex=2,,alpha = .4)+
+    scale_color_viridis("z-score",option = "C")+#,limits = c(-3, 8),begin=5/16)+
+    facet_grid(cols = vars(id),rows=vars(activation))+
+    theme_minimal(base_size = 40)+
+    theme(legend.key.size = unit(20,'mm'))
+}
+
+plotList = list()
+
+# Mono CD14 CD16
+sce = outliers$mono
+x = "CD16"
+y = "CD14"
+z = c("CD40","TNFa","HLADR","CD86")
+ids = as.character(unique(sce$sample_id))
+plotList$Monocyte = plot_flow_activation(sce,x,y,z,ids)
+
+
+p = ggarrange(plotlist = plotList,nrow = length(plotList))
+
+# png("./figures_final/Outliers/Flow Plots 33EM Mono activation -- 2.png",width=600*3,height=300*6)
+# p
+# dev.off()
+
+p
+```
+

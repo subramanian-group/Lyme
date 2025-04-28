@@ -1,0 +1,1100 @@
+---
+title: "Figure 3"
+editor_options: 
+  chunk_output_type: console
+format:
+  html:
+    warning: false     
+    message: false
+    cache: true
+    error: true
+    echo: false        
+    code-fold: true
+    code-tools: true
+---
+
+```{r libraries}
+#| echo: false
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  # Data wrangling and visualization
+  tidyverse, # Core data wrangling and plotting
+  ggrepel, # Repel overlapping text labels in ggplot2
+  ggstance, # Horizontal geoms for ggplot2
+  gghighlight, # Highlight ggplot2 layers based on conditions
+  ggnewscale, # Multiple color/size scales in ggplot2
+  geomTextpath,
+  patchwork, # Combine multiple ggplots
+  cowplot, # Additional plot layout tools
+  camcorder, # Review plot proportionality before saving
+  RColorBrewer, # Color palettes for plots
+  Hmisc, # Various utilities (summary stats, tables, plots)
+  ggpubr, # Publication-ready ggplot2 enhancements
+  ggplotify, # Convert plots into ggplot objects
+  conflicted, # Manage function conflicts
+
+  # Bulk RNA-seq and statistical modeling
+  # limma, # Linear models for microarray and RNA-seq
+  # edgeR, # Differential expression for count data
+  # DESeq2, # Differential expression for RNA-seq
+
+  # Enrichment analysis and gene sets
+  # clusterProfiler, # GO/KEGG enrichment analysis
+  # enrichR, # Enrichment analysis via web APIs
+  # msigdbr, # Molecular Signatures Database (MSigDB) in R
+  # DOSE, # Disease Ontology Semantic and Enrichment analysis
+  # org.Hs.eg.db, # Human gene annotation database
+
+  # Heatmaps and Venn diagrams
+  ComplexHeatmap, # Advanced customizable heatmaps
+  pheatmap, # Simple heatmaps
+  VennDiagram, # Venn diagram drawing
+  UpSetR, # Set visualization (UpSet plots)
+  factoextra, # Visualization for multivariate data (PCA, clustering)
+
+  # Network and graph analysis
+  # ggraph, # Graph/network visualization
+  # tidygraph, # Tidy interface for graph data
+  # igraph, # Core graph algorithms
+
+  # Machine learning
+  caret,             # Machine learning training and tuning
+  glmnet,            # Elastic-net regression (lasso + ridge)
+  glmmLasso,
+  e1071,             # SVM and other ML algorithms
+  mice,              # Multivariate imputation of missing values
+  matrixStats,       # Fast row/column computations
+  progress,          # Progress bars for loops
+
+  # # Single-cell RNA-seq analysis
+  # DropletUtils,     # Handling droplet scRNA-seq outputs
+  # Seurat,           # Single-cell RNA-seq toolkit
+  # scater,           # SingleCellExperiment QC and plotting
+  # scuttle,          # Utilities for SingleCellExperiment objects
+  # SingleR,          # Automated cell type labeling
+  # celldex,          # Reference datasets for SingleR
+  # cellassign        # Probabilistic cell assignment (needs tensorflow)
+  # tensorflow,       # TensorFlow backend for deep learning (needed by cellassign)
+
+  # Table formatting and reports
+  # kableExtra,        # Enhanced tables in HTML and LaTeX
+  # officer,           # Create/edit Word and PowerPoint documents
+  # openxlsx,          # Read/write Excel files
+  here,
+  datapasta # Copy-paste data into Excel
+)
+```
+
+```{r setup}
+#| echo: false
+
+# Resolve conflicts
+conflicts_prefer(dplyr::select,
+                 dplyr::filter,
+                 dplyr::slice,
+                 dplyr::count,
+                 dplyr::rename,
+                 dplyr::desc)
+
+# Set a global theme and base size
+theme_set(
+  theme_minimal()
+)
+```
+
+```{r community_heatmap}
+#| eval: false
+
+loadings <- read_excel("data/Lyme_T1_T3_Communities_Padjust05_x_fix.xlsx", sheet = 6)
+communities <- read_excel("data/Lyme_T1_T3_Communities_Padjust05_x_fix.xlsx", sheet = 2)
+
+# From Communities excel
+communities_filt <- communities[communities$Community_T1 %in% c(1,3,4),]
+#IF NA change to non
+communities_filt$dichotomized_change[is.na(communities_filt$dichotomized_change)] <- "non"
+communities_filt$Significance[is.na(communities_filt$Significance)] <- "Non"
+
+correlations <- corr_values ### This is from running the community_Analysis!!!!
+
+correlations_filt <- correlations[correlations$Feature1 %in% communities_prot$Node,]
+correlations_filt <- correlations_filt[correlations_filt$Feature2 %in% communities_met$Node,]
+
+correlations_R <- correlations_filt[, c("Feature1", "Feature2", "R")]
+correlations_P <- correlations_filt[, c("Feature1", "Feature2", "p.adj")]
+
+# change correlations_filt to a wide matrix
+correlations_R <- correlations_R %>% pivot_wider(names_from = Feature2, values_from = R)
+correlations_P <- correlations_P %>% pivot_wider(names_from = Feature2, values_from = p.adj)
+
+# Correlation and pvalue matrices for heatmap
+mat1 <- as.matrix(correlations_R[, -1])
+rownames(mat1) <- correlations_R$Feature1
+mat2 <- as.matrix(correlations_P[, -1])
+rownames(mat2) <- correlations_P$Feature1
+
+#Name columns and rows
+colnames(mat1) <- communities_met$Node
+rownames(mat1) <- communities_prot$Node
+
+#Proteins
+prots1 <- read_delim("../corrected data/olink_physiologic.csv")
+prots2 <- read_delim("../corrected data/olink_immune.csv")
+prots1$...1 <- gsub(" ", "_", prots1$...1)
+prots2$...1 <- gsub(" ", "_", prots2$...1)
+prots <- merge(prots1, prots2, by="...1", all=TRUE)
+colnames(prots)[1] <- "SampleID"
+
+#Metabolites
+mets_full <- read_delim("../corrected data/metabolites.csv")
+mets_full$...1 <- gsub(" ", "_", mets_full$...1)
+mets <- mets_full %>% dplyr::select(-contains("X-"))
+
+
+
+### Samples
+colnames(mets)[1] <- "SampleID"
+meta <- read_delim("metadata.csv")
+meta$...1 <- gsub(" ", "_", meta$...1)
+colnames(meta)[1] <- "SampleID"
+### separate column by delimiter
+meta <- meta %>% separate(SampleID, c("ID", "Time"), sep="_", remove = FALSE)
+
+Control <- subset(meta, Condition=="Control")
+Control_T1 <- subset(Control, Time=="T1")
+
+T1 <- subset(meta, Condition=="Patient" & Time=="T1")
+T3 <- subset(meta, Condition=="Patient" & Time=="T3")
+
+IDS <- Reduce(intersect, list(T1$SampleID, mets$SampleID, prots$SampleID))
+prots_Fz <- prots[prots$SampleID %in% IDS,]
+mets_Fz <- mets[mets$SampleID %in% IDS,]
+colnames(prots_Fz)[2:ncol(prots_Fz)] <- paste("prots", colnames(prots_Fz)[2:ncol(prots_Fz)], sep=".")
+colnames(mets_Fz)[2:ncol(mets_Fz)] <- paste("mets", colnames(mets_Fz)[2:ncol(mets_Fz)], sep=".")
+
+comb_Fz <- merge(prots_Fz, mets_Fz, by="SampleID")
+comb_Fz <- data.frame(comb_Fz, check.names=TRUE)
+### Loadings
+loadings_filt <- loadings[loadings$Community %in% c(1,3,4),]
+loadings_filt <- loadings_filt[loadings_filt$Feature %in% colnames(comb_Fz),]
+
+
+comb_filt <- comb_Fz[,colnames(comb_Fz) %in% c("SampleID", loadings_filt$Feature)]
+
+pheno <- read_xlsx("symptom_scores.xlsx")
+pheno <- pheno[,c("SampleID", "Avg. Symptom Score")]
+
+comb_pheno <- merge(comb_filt, pheno, by="SampleID")
+
+correlations <- psych::corr.test(comb_pheno[,2:ncol(comb_pheno)], method="spearman",adjust="BH", ci=FALSE)
+correlations <- as.data.frame(correlations$r)
+correlations$Feature <- rownames(correlations)
+correlations <- correlations[,c("Feature", "Avg. Symptom Score")]
+
+loadings_filt <- merge(loadings_filt, correlations, by="Feature")
+
+# remove ... from the names
+loadings_filt$Feature <- gsub("\\.\\.\\.", "", loadings_filt$Feature)
+loadings_filt$Feature <- gsub("\\.\\.", "", loadings_filt$Feature)
+loadings_filt$Feature <- gsub("mets.", "", loadings_filt$Feature)
+loadings_filt$Feature <- gsub("prots.", "", loadings_filt$Feature)
+
+
+#### Heatmap
+# Create row splits
+row_split <- unlist(as.list(communities_prot$Community_T1))
+col_split <- unlist(as.list(communities_met$Community_T1))
+
+
+#if community is equal to 3 then multiply loading by -1
+loadings_filt$Loading[loadings_filt$Community == 3] <- loadings_filt$Loading[loadings_filt$Community == 3] * -1
+loadings_filt$Loading[loadings_filt$Community == 4] <- loadings_filt$Loading[loadings_filt$Community == 4] * -1
+
+
+# Get colors from GGPLOT
+colors <- ggplot(loadings_filt, aes(x = reorder(Feature,-Loading), y = Loading)) +
+  geom_col(position = "identity", colour = "black", size = 0.25, aes(fill=`Avg. Symptom Score`)) + ylab("PC1 Loading") + xlab("Feature") +
+  scale_fill_gradient2(low = "#24693D", mid = "white", high = "#AF46B4", midpoint = 0, name = "Rho Avg Symptom") + theme_classic() +
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1, size=14))
+
+
+g <- ggplot_build(colors)
+g$data[[1]]["fill"]
+
+loadings_filt$Sig_color <- g$data[[1]]["fill"]
+
+# Add loadings to community DF
+communities_prot2 <- merge(communities_prot, loadings_filt, by.x="Node", by.y="Feature", all=FALSE)
+#Order same as communities_prot
+communities_prot2 <- communities_prot2[match(communities_prot$Node, communities_prot2$Node),]
+
+communities_met2 <- merge(communities_met, loadings_filt, by.x="Node", by.y="Feature", all=FALSE)
+#Order same as communities_met
+communities_met2 <- communities_met2[match(communities_met$Node, communities_met2$Node),]
+
+ha = HeatmapAnnotation(Significance = communities_met2$Significance, Loading = anno_barplot(communities_met2$Loading, height = unit(2, "cm"), gp=(gpar(communities_met2$Sig_color))[[1]]), show_annotation_name = FALSE,
+                       col = list(Significance = c("<0.05 Up" = "#D95F02", "<0.075 Up" = "#E6AB02",  "Non" = "grey", "<0.05 Down" = "blue3")))
+hr = rowAnnotation(Significance = communities_prot2$Significance, Loading = anno_barplot(communities_prot2$Loading, width = unit(3, "cm"), gp=(gpar(communities_prot2$Sig_color))[[1]]),  show_annotation_name = FALSE,
+                   col = list(Significance = c("<0.05 Up" = "#D95F02", "<0.075 Up" = "#E6AB02",  "Non" = "grey", "<0.05 Down" = "blue3")), show_legend = c("sig" = FALSE))
+
+
+col_fun = colorRamp2(c(-0.4, 0, 0.6), c("#24693D", "white", "#AF46B4"))
+lgd = Legend(col_fun = col_fun, title = "Rho Avg Symptom", at = c(-.4, 0, .6), labels = c("-.4", "0", ".6"))
+draw(lgd)
+
+ht <- Heatmap(mat1, column_split= col_split, row_split = row_split,
+              row_title = c("Community 3", "Community 1", "Community 4"),
+              column_title = c("Community 4", "Community 3", "Community 1"),
+              column_names_rot = 60,
+              cell_fun = function(j, i, x, y, w, h, fill){
+                if(mat2[i, j] < 0.001) {
+                  grid.text("***", x, y)
+                } else if(mat2[i, j] < 0.01) {
+                  grid.text("**", x, y)
+                } else if(mat2[i, j] < 0.05) {
+                  grid.text("*", x, y)
+                }
+              },
+              bottom_annotation = ha,
+              right_annotation = hr,
+              heatmap_legend_param = list(title = "R")
+)
+
+
+tiff("Heatmap_Lyme_V5.tiff", width = 10, height = 14, units = 'in', res = 150)
+ht
+draw(lgd, x= unit(21.6, "cm"), y = unit(16, "cm"), just = c("left", "bottom"))
+dev.off()
+```
+
+```{r community_heatmap_direct}
+#| echo: true
+#| eval: true
+#| fig-cap: "Figure 3a"
+
+knitr::include_graphics("Heatmap_Lyme_V4.tiff")
+```
+
+```{r glmmLasso_prep}
+#| echo: false
+#| eval: false
+
+# Read and preprocess assay data
+npx <- read_csv("~/lyme-paper/Data/Prospective/Raw/Olink2/npx.csv", col_names = F) |> dplyr::slice(4, 8:97) 
+
+# Setting column names
+colnames(npx) <- npx |> 
+  dplyr::slice(1) |> # the names are in the first row
+  unlist() |> # converting the single-rowed data frame to a character vector
+  vctrs::vec_as_names(repair = "unique") |>  
+  str_replace("\\.{3}", "_")  # replacing "..." in the repaired names with "_"
+
+npx <- npx[-1, ]
+
+npx <- npx |> mutate(across(.cols = -1, .fns = as.numeric))
+
+# Extracting sample and Subject_ID information
+npx <- npx |> mutate(sample = str_replace(Assay, "L(\\d+)_(\\w+)", "\\1 \\2"),
+                     Subject_ID = str_replace(Assay, "L(\\d+)_(\\w+)", "\\1") |> as.factor(),
+                     Assay = sample) |> 
+  relocate(c(sample, Subject_ID), .before = 2)
+
+npx <- npx |> column_to_rownames("Assay")
+
+# Removing all columns whose names were repaired, except KIM1 and PGF
+npx <- npx |> dplyr::select(-contains("_"),
+                            contains(c("KIM1","PGF")))
+
+assayData <- npx
+
+# Data Filtering
+load(here("data", "OlinkPreprocessed.RData"))
+
+sampleData <- data$sampleData 
+
+sampleData <- inner_join(sampleData, assayData |> dplyr::select(sample))
+
+assayData <- assayData |> filter(sample %in% (sampleData |> pluck("sample"))) |> arrange(sample)
+
+physiologic_data <- assayData
+
+# Read and preprocess assay data
+npx <- read_csv("C:/Users/abhalla/Downloads/corrected data/olink_immune.csv") |> rename(sample = 1) 
+
+assayData <- npx 
+
+# Data Filtering
+load(here("data", "OlinkPreprocessed.RData"))
+
+sampleData <- data$sampleData 
+
+sampleData <- inner_join(sampleData, assayData |> dplyr::select(sample))
+
+assayData <- assayData |> filter(sample %in% (sampleData |> pluck("sample"))) |> arrange(sample)
+
+# assayData <- assayData %>%
+#   mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+immune_data <- assayData
+
+# Read and preprocess assay data
+npx <- read_csv("C:/Users/abhalla/Downloads/corrected data/metabolites.csv") |> rename(sample = 1) %>% 
+  rename_with(~make.names(.))
+
+npx <- npx %>%
+  # select(-contains(c("pyrroline", "methylnicotinamide", "spermidine", "DiHOME", "hydroxyindoleacetate"))) %>%
+  mutate(across(where(is.numeric), 
+                ~ if_else(is.na(.), median(., na.rm = TRUE), .)))
+
+assayData <- npx |> select(-matches("X\\.\\d+$"))
+
+assayData <- assayData |> select(-bradykinin) # identical values for all samples
+
+# Data Filtering
+load(here("data", "OlinkPreprocessed.RData"))
+
+sampleData <- data$sampleData
+
+sampleData <- inner_join(sampleData, assayData |> dplyr::select(sample))
+
+assayData <- assayData |> filter(sample %in% (sampleData |> pluck("sample"))) |> arrange(sample)
+
+metabolic_data <- assayData
+
+community_analytes <- c("N.acetylneuraminate", "quinolinate", "kynurenine", "X13.HODE...9.HODE", "X1.linoleoyl.GPE..18.2..", "X1.stearoyl.2.oleoyl.GPS..18.0.18.1.", "hexanoylglutamine", "adenosine.5..monophosphate..AMP.", "sphinganine", "sphingosine", "phosphoethanolamine", "oleoylcarnitine..C18.1.", "tetradecanedioate..C14.DC.", "sebacate..C10.DC.", "hexadecanedioate..C16.DC.", "dodecenedioate..C12.1.DC..", "hypoxanthine", "sphingosine.1.phosphate", "FOXO1", "ITGB1BP2", "ERBB2IP", "YES1", "LAT2", "GRAP2", "SNAP23", "CD40.L", "SRC", "STX8", "CD2AP", "DAB2", "ANXA11", "PVALB", "VASH1", "USP8", "TXNDC5", "AIFM1", "SMAD1", "DECR1", "MAX", "COMT", "MGMT", "HSP.27", "ANGPT1", "PDGF.subunit.B", "SDC4", "Dkk.1", "HB.EGF", "LOX.1", "CCL17", "BANK1", "PAR.1", "CRKL", "CA13", "NEMO", "CXCL1.x", "PPP1R2", "STK4", "CEACAM8", "ENO2", "PRKRA", "CXCL11", "THOP1", "MVK", "PILRB", "SEMA3F", "LILRA5", "TYMP", "CTSL1", "TIGAR", "SERPINB8", "Gal.9", "CXCL9", "IL.1ra", "CXCL10", "CCL3", "MIP.1.alpha", "FAM3B")
+```
+
+```{r glmmLasso_community.analytes}
+#| echo: false
+#| eval: false
+
+# lasso----
+
+# Data preparation for GLMM with LASSO
+
+sampleData <- data$sampleData |> filter(Condition == "Patient", time %in% c("T1","T3")) |> filter(
+  Subject_ID %in% 
+    (data$sampleData |> 
+       filter(Condition == "Patient", time %in% c("T1","T3")) |> 
+       count(Subject_ID) |> 
+       filter(n == 2) |> 
+       pluck("Subject_ID"))
+  )
+
+# Create Response Variable
+outcomes <- sampleData |> dplyr::select(sample, Subject_ID, Condition, time) |> 
+  mutate(infected = case_when(Condition == "Patient" & time == "T1" ~ TRUE, 
+                              TRUE ~ FALSE))
+
+# Use purrr::reduce() to iteratively inner_join the datasets on the "sample" column
+combined_data <- purrr::reduce(list(physiologic_data, immune_data, metabolic_data), dplyr::inner_join, by = "sample") 
+
+combined_data <- inner_join(outcomes, combined_data, by = "sample") |> 
+    mutate(sample = sample |> as.factor(),
+         Subject_ID = Subject_ID |> as.factor(),
+         Condition = Condition |> as.factor(),
+         time = time |> as.factor()
+         )
+
+colnames(combined_data) <- combined_data |> colnames() |> make.names()
+
+# reduces by one column
+combined_data <- combined_data %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .))) |>
+  select(where(~ !is.numeric(.) || stats::var(.) > 0))  # Retain non-numeric columns and numeric with var > 0
+
+# reduces by 30-40 columns
+combined_data <- combined_data %>%
+  select(where(~ !all(is.na(.))))
+
+# Remove near-zero variance variables
+nzv <- combined_data |>
+  caret::nearZeroVar(saveMetrics = TRUE) |>  # Identify near-zero variance variables (caret)
+  filter(nzv) |>
+  rownames()  # Get variable names
+
+combined_data <- combined_data |>
+  select(-all_of(nzv))  # Remove variables with near-zero variance
+
+# Remove highly correlated variables (e.g., > 0.75)
+highly_correlated <- combined_data |>
+  select(where(is.numeric)) |>
+  cor(use = "pairwise.complete.obs") |>  # Compute pairwise correlations
+  caret::findCorrelation(cutoff = 0.75, names = TRUE) # Identify groups with high correlations (caret)
+
+# combined_data <- combined_data |> select(-all_of(highly_correlated))  # Remove correlated variable
+
+combined_data <- combined_data |> select(sample, Subject_ID, time, infected, 
+                                          community_analytes
+                                         )
+
+options(expressions = 50000)
+
+# Create the model formula in one line using pipes
+model_formula <- combined_data |>
+  select(-(1:4)) |> names() |>  # Extract all variable names except  first five
+  paste(collapse = " + ") %>%   # Concatenate the variable names with " + " in between
+  paste("infected ~", .) |>     # Prepend the dependent variable 'infected ~' to the concatenated variables
+  as.formula()                  # Convert the resulting string into a formula object
+
+# # GLMM with LASSO, accounting for paired samples
+set.seed(123)
+# relax <- TRUE
+# alpha <- 1
+prop_out <- 0.2
+n_sim <- 500
+
+# # Determine consistent set of thresholds for ROC analysis
+initial_model <- glmmLasso(
+  fix = model_formula,
+  rnd = list(Subject_ID = ~1),
+  family = binomial(link = "logit"),
+  data = combined_data,
+  lambda = 20, # Adjust lambda as necessary for regularization
+  switch.NR = TRUE
+)
+
+initial_predicted_probs <- predict(initial_model, newdata = combined_data, type = "response")
+initial_roc_curve <- pROC::roc(combined_data$infected, as.numeric(initial_predicted_probs))
+consistent_thresholds <- initial_roc_curve$thresholds |> sort() %>% 
+  `[`(c(-1, -79)) |> sample(77)
+
+# Initialize the progress bar
+pb <- progress::progress_bar$new(
+  total = n_sim,
+  format = "\n task :percent complete  [:bar] :eta time remaining \n",
+  clear = FALSE,
+  width = 60
+)
+
+# Mapping over each simulation iteration (1 to n_sim).
+results_community.analytes <- map_dfr(1:n_sim, ~{
+
+  # Partitioning the data while keeping paired samples together
+  training_indices <- unique(combined_data$Subject_ID) %>% as.numeric() %>%
+    caret::createDataPartition(y = ., p = 1 - prop_out, list = FALSE) %>%
+    as.vector()
+
+   # Ensuring paired samples are kept together
+  training_subjects <- combined_data$Subject_ID[training_indices]
+  train_data <- combined_data %>% filter(Subject_ID %in% training_subjects)
+  test_data <- combined_data %>% filter(!Subject_ID %in% training_subjects)
+
+  # Fitting the GLMM with LASSO regression model
+  model <- glmmLasso(
+    fix = model_formula,
+    rnd = list(Subject_ID = ~1),
+    family = binomial(link = "logit"),
+    data = train_data,
+    lambda = 10, # Adjust lambda as necessary for regularization
+    switch.NR = TRUE,
+  )
+
+  # Calculating the AUC for the training data
+  predicted_probs <- predict(model, newdata = test_data, type = "response")
+  roc_curve <- pROC::roc(test_data$infected, as.numeric(predicted_probs))
+  auc <- as.numeric(pROC::auc(roc_curve))
+
+  pb$tick()
+
+  # Return as a list-column data frame
+  tibble(model = list(model), auc = auc, roc_curve = list(roc_curve))
+})
+
+# # Extracting ROC data for all iterations from already calculated results
+roc.data_community.analytes <- results_community.analytes %>%
+  mutate(
+    model_num = row_number(),
+    fpr = map(roc_curve, ~.x$specificities[1:length(consistent_thresholds)] |> rev()),
+    tpr = map(roc_curve, ~.x$sensitivities[1:length(consistent_thresholds)] |> rev()),
+    thresholds = map(1:n(), ~consistent_thresholds)  # Repeat consistent_thresholds for each row
+  ) %>%
+  select(model_num, fpr, tpr, thresholds) %>%
+  unnest(c(fpr, tpr, thresholds))
+
+# # Calculate mean and confidence interval for TPR and FPR at each threshold
+tpr.fpr_community.analytes <- roc.data_community.analytes %>%
+  group_by(thresholds) %>%
+  summarise(
+    # mean_tpr = mean(tpr, na.rm = TRUE),
+    # mean_fpr = mean(fpr, na.rm = TRUE),
+    # tpr_ci_lower = mean_tpr - qt(0.975, df = n() - 1) * sd(tpr, na.rm = TRUE) / sqrt(n()),
+    # tpr_ci_upper = mean_tpr + qt(0.975, df = n() - 1) * sd(tpr, na.rm = TRUE) / sqrt(n()),
+    # fpr_ci_lower = mean_fpr - qt(0.975, df = n() - 1) * sd(fpr, na.rm = TRUE) / sqrt(n()),
+    # fpr_ci_upper = mean_fpr + qt(0.975, df = n() - 1) * sd(fpr, na.rm = TRUE) / sqrt(n())
+    median_tpr = median(tpr, na.rm = TRUE),
+    median_fpr = median(fpr, na.rm = TRUE)
+  ) %>%
+  arrange(thresholds)
+
+community_predictors <- map_dfr(results_community.analytes$model, ~ .x[["coefficients"]] %>%
+            as.data.frame() %>%
+            rownames_to_column() %>%
+            rename(term = 1, slope = 2) %>%
+            filter(slope != 0 , term != "(Intercept)"),
+        .id = "row_id") |> count(term) |> arrange(desc(n)) |> 
+  filter(n > 250)
+
+closest_match_index <- stringdist::amatch(community_predictors$term, 
+                                          community_analytes, 
+                                          method = "osa", 
+                                          maxDist = 1)
+
+community_predictors$matched_analytes <- community_analytes[closest_match_index]
+```
+
+```{r glmmLasso_predictive.analytes}
+#| echo: false
+#| eval: false
+
+combined_data <- combined_data |> select(sample, Subject_ID, time, infected, 
+                                         community_predictors$term
+                                         )
+
+options(expressions = 50000)
+
+# Create the model formula in one line using pipes
+model_formula <- combined_data |>
+  select(-(1:4)) |> names() |>  # Extract all variable names except  first five
+  paste(collapse = " + ") %>%   # Concatenate the variable names with " + " in between
+  paste("infected ~", .) |>     # Prepend the dependent variable 'infected ~' to the concatenated variables
+  as.formula()                  # Convert the resulting string into a formula object
+
+# # GLMM with LASSO, accounting for paired samples
+set.seed(123)
+# relax <- TRUE
+# alpha <- 1
+prop_out <- 0.2
+n_sim <- 500
+
+# # Determine consistent set of thresholds for ROC analysis
+initial_model <- glmmLasso(
+  fix = model_formula,
+  rnd = list(Subject_ID = ~1),
+  family = binomial(link = "logit"),
+  data = combined_data,
+  lambda = 20, # Adjust lambda as necessary for regularization
+  switch.NR = TRUE
+)
+
+initial_predicted_probs <- predict(initial_model, newdata = combined_data, type = "response")
+initial_roc_curve <- pROC::roc(combined_data$infected, as.numeric(initial_predicted_probs))
+consistent_thresholds <- initial_roc_curve$thresholds |> sort() %>% 
+  `[`(c(-1, -79)) |> sample(77)
+
+# Initialize the progress bar
+pb <- progress::progress_bar$new(
+  total = n_sim,
+  format = "\n task :percent complete  [:bar] :eta time remaining \n",
+  clear = FALSE,
+  width = 60
+)
+
+# Mapping over each simulation iteration (1 to n_sim).
+results_predictive.analytes <- map_dfr(1:n_sim, ~{
+
+  # Partitioning the data while keeping paired samples together
+  training_indices <- unique(combined_data$Subject_ID) %>% as.numeric() %>%
+    caret::createDataPartition(y = ., p = 1 - prop_out, list = FALSE) %>%
+    as.vector()
+
+   # Ensuring paired samples are kept together
+  training_subjects <- combined_data$Subject_ID[training_indices]
+  train_data <- combined_data %>% filter(Subject_ID %in% training_subjects)
+  test_data <- combined_data %>% filter(!Subject_ID %in% training_subjects)
+
+  # Fitting the GLMM with LASSO regression model
+  model <- glmmLasso(
+    fix = model_formula,
+    rnd = list(Subject_ID = ~1),
+    family = binomial(link = "logit"),
+    data = train_data,
+    lambda = 10, # Adjust lambda as necessary for regularization
+    switch.NR = TRUE,
+  )
+
+  # Calculating the AUC for the training data
+  predicted_probs <- predict(model, newdata = test_data, type = "response")
+  roc_curve <- pROC::roc(test_data$infected, as.numeric(predicted_probs))
+  auc <- as.numeric(pROC::auc(roc_curve))
+
+  pb$tick()
+
+  # Return as a list-column data frame
+  tibble(model = list(model), auc = auc, roc_curve = list(roc_curve))
+})
+
+# # Extracting ROC data for all iterations from already calculated results
+roc.data_predictive.analytes <- results_predictive.analytes %>%
+  mutate(
+    model_num = row_number(),
+    fpr = map(roc_curve, ~.x$specificities[1:length(consistent_thresholds)] |> rev()),
+    tpr = map(roc_curve, ~.x$sensitivities[1:length(consistent_thresholds)] |> rev()),
+    thresholds = map(1:n(), ~consistent_thresholds)  # Repeat consistent_thresholds for each row
+  ) %>%
+  select(model_num, fpr, tpr, thresholds) %>%
+  unnest(c(fpr, tpr, thresholds))
+
+# # Calculate mean and confidence interval for TPR and FPR at each threshold
+tpr.fpr_predictive.analytes <- roc.data_predictive.analytes %>%
+  group_by(thresholds) %>%
+  summarise(
+    # mean_tpr = mean(tpr, na.rm = TRUE),
+    # mean_fpr = mean(fpr, na.rm = TRUE),
+    # tpr_ci_lower = mean_tpr - qt(0.975, df = n() - 1) * sd(tpr, na.rm = TRUE) / sqrt(n()),
+    # tpr_ci_upper = mean_tpr + qt(0.975, df = n() - 1) * sd(tpr, na.rm = TRUE) / sqrt(n()),
+    # fpr_ci_lower = mean_fpr - qt(0.975, df = n() - 1) * sd(fpr, na.rm = TRUE) / sqrt(n()),
+    # fpr_ci_upper = mean_fpr + qt(0.975, df = n() - 1) * sd(fpr, na.rm = TRUE) / sqrt(n())
+    median_tpr = median(tpr, na.rm = TRUE),
+    median_fpr = median(fpr, na.rm = TRUE)
+  ) %>%
+  arrange(thresholds)
+```
+
+```{r glmmLasso_all.analytes}
+#| echo: false
+#| eval: false
+
+# lasso----
+
+# Data preparation for GLMM with LASSO
+
+sampleData <- data$sampleData |> filter(Condition == "Patient", time %in% c("T1","T3")) |> filter(
+  Subject_ID %in%
+    (data$sampleData |>
+       filter(Condition == "Patient", time %in% c("T1","T3")) |>
+       count(Subject_ID) |>
+       filter(n == 2) |>
+       pluck("Subject_ID"))
+  )
+
+# Create Response Variable
+outcomes <- sampleData |> dplyr::select(sample, Subject_ID, Condition, time) |> 
+  mutate(infected = case_when(Condition == "Patient" & time == "T1" ~ TRUE, 
+                              TRUE ~ FALSE))
+
+# Use purrr::reduce() to iteratively inner_join the datasets on the "sample" column
+combined_data <- purrr::reduce(list(physiologic_data, immune_data, metabolic_data), dplyr::inner_join, by = "sample") 
+
+combined_data <- inner_join(outcomes, combined_data, by = "sample") |> 
+    mutate(sample = sample |> as.factor(),
+         Subject_ID = Subject_ID |> as.factor(),
+         Condition = Condition |> as.factor(),
+         time = time |> as.factor()
+         )
+
+colnames(combined_data) <- combined_data |> colnames() |> make.names()
+
+# reduces by one column
+combined_data <- combined_data %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .))) |>
+  select(where(~ !is.numeric(.) || stats::var(.) > 0))  # Retain non-numeric columns and numeric with var > 0
+
+# reduces by 30-40 columns
+combined_data <- combined_data %>%
+  select(where(~ !all(is.na(.))))
+
+# Remove near-zero variance variables
+nzv <- combined_data |>
+  caret::nearZeroVar(saveMetrics = TRUE) |>  # Identify near-zero variance variables (caret)
+  filter(nzv) |>
+  rownames()  # Get variable names
+
+combined_data <- combined_data |>
+  select(-all_of(nzv))  # Remove variables with near-zero variance
+
+# Remove highly correlated variables (e.g., > 0.75)
+highly_correlated <- combined_data |>
+  select(where(is.numeric)) |>
+  cor(use = "pairwise.complete.obs") |>  # Compute pairwise correlations
+  caret::findCorrelation(cutoff = 0.75, names = TRUE) # Identify groups with high correlations (caret)
+
+combined_data <- combined_data |> select(-all_of(
+  base::setdiff(
+    highly_correlated,         # Remove correlated variable
+    community_predictors$term  # but not strong predictors
+    ) 
+  )
+  )  
+
+options(expressions = 50000)
+
+# Create the model formula in one line using pipes
+model_formula <- combined_data |>
+  select(-(1:4)) |> names() |>  # Extract all variable names except  first five
+  paste(collapse = " + ") %>%   # Concatenate the variable names with " + " in between
+  paste("infected ~", .) |>     # Prepend the dependent variable 'infected ~' to the concatenated variables
+  as.formula()                  # Convert the resulting string into a formula object
+
+# # GLMM with LASSO, accounting for paired samples
+set.seed(123)
+# relax <- TRUE
+# alpha <- 1
+prop_out <- 0.2
+n_sim <- 500
+
+# # Determine consistent set of thresholds for ROC analysis
+initial_model <- glmmLasso(
+  fix = model_formula,
+  rnd = list(Subject_ID = ~1),
+  family = binomial(link = "logit"),
+  data = combined_data,
+  lambda = 20, # Adjust lambda as necessary for regularization
+  switch.NR = TRUE
+)
+
+initial_predicted_probs <- predict(initial_model, newdata = combined_data, type = "response")
+initial_roc_curve <- pROC::roc(combined_data$infected, as.numeric(initial_predicted_probs))
+consistent_thresholds <- initial_roc_curve$thresholds |> sort() %>% 
+  `[`(c(-1, -79)) |> sample(77)
+
+# Initialize the progress bar
+pb <- progress::progress_bar$new(
+  total = n_sim,
+  format = "\n task :percent complete  [:bar] :eta time remaining \n",
+  clear = FALSE,
+  width = 60
+)
+
+# Mapping over each simulation iteration (1 to n_sim).
+results_all.analytes <- map_dfr(1:n_sim, ~{
+
+  # Partitioning the data while keeping paired samples together
+  training_indices <- unique(combined_data$Subject_ID) %>% as.numeric() %>%
+    caret::createDataPartition(y = ., p = 1 - prop_out, list = FALSE) %>%
+    as.vector()
+
+   # Ensuring paired samples are kept together
+  training_subjects <- combined_data$Subject_ID[training_indices]
+  train_data <- combined_data %>% filter(Subject_ID %in% training_subjects)
+  test_data <- combined_data %>% filter(!Subject_ID %in% training_subjects)
+
+  # Fitting the GLMM with LASSO regression model
+  model <- glmmLasso(
+    fix = model_formula,
+    rnd = list(Subject_ID = ~1),
+    family = binomial(link = "logit"),
+    data = train_data,
+    lambda = 10, # Adjust lambda as necessary for regularization
+    switch.NR = TRUE,
+  )
+
+  # Calculating the AUC for the training data
+  predicted_probs <- predict(model, newdata = test_data, type = "response")
+  roc_curve <- pROC::roc(test_data$infected, as.numeric(predicted_probs))
+  auc <- as.numeric(pROC::auc(roc_curve))
+
+  pb$tick()
+
+  # Return as a list-column data frame
+  tibble(model = list(model), auc = auc, roc_curve = list(roc_curve))
+})
+
+# # Extracting ROC data for all iterations from already calculated results
+roc.data_all.analytes <- results_all.analytes %>%
+  mutate(
+    model_num = row_number(),
+    fpr = map(roc_curve, ~.x$specificities[1:length(consistent_thresholds)] |> rev()),
+    tpr = map(roc_curve, ~.x$sensitivities[1:length(consistent_thresholds)] |> rev()),
+    thresholds = map(1:n(), ~consistent_thresholds)  # Repeat consistent_thresholds for each row
+  ) %>%
+  select(model_num, fpr, tpr, thresholds) %>%
+  unnest(c(fpr, tpr, thresholds))
+
+# # Calculate mean and confidence interval for TPR and FPR at each threshold
+tpr.fpr_all.analytes <- roc.data_all.analytes %>%
+  group_by(thresholds) %>%
+  summarise(
+    # mean_tpr = mean(tpr, na.rm = TRUE),
+    # mean_fpr = mean(fpr, na.rm = TRUE),
+    # tpr_ci_lower = mean_tpr - qt(0.975, df = n() - 1) * sd(tpr, na.rm = TRUE) / sqrt(n()),
+    # tpr_ci_upper = mean_tpr + qt(0.975, df = n() - 1) * sd(tpr, na.rm = TRUE) / sqrt(n()),
+    # fpr_ci_lower = mean_fpr - qt(0.975, df = n() - 1) * sd(fpr, na.rm = TRUE) / sqrt(n()),
+    # fpr_ci_upper = mean_fpr + qt(0.975, df = n() - 1) * sd(fpr, na.rm = TRUE) / sqrt(n())
+    median_tpr = median(tpr, na.rm = TRUE),
+    median_fpr = median(fpr, na.rm = TRUE)
+  ) %>%
+  arrange(thresholds)
+```
+
+```{r save_glmmLasso}
+#| echo: false
+#| eval: false
+
+# save(results_all.analytes,
+#      results_community.analytes,
+#      results_predictive_analytes,
+#      file = "results_glmmLasso.RData")
+
+load("results_glmmLasso.RData")
+```
+
+```{r plot_glmmLasso_all.analytes}
+#| echo: false
+#| eval: false
+
+# Record the plot output for reproducibility
+gg_record(
+  device = "png",
+  width = 2,
+  height = 2,
+  unit = "in"
+)
+
+# Define common FPR points for alignment
+fpr_common <- seq(0, 1, length.out = 1000)  # Increased to 1000 points for smoother curves
+
+# Interpolate all ROC curves at the common FPR points
+interpolated_roc_data <- map_dfr(results_all.analytes$roc_curve, ~ {
+  tibble(
+    fpr = fpr_common,
+    tpr = approx(1 - .x$specificities, .x$sensitivities, xout = fpr_common)$y
+  )
+}, .id = "simulation")
+
+# Calculate the median AUC
+auc_values <- results_all.analytes %>% pull(auc)
+median_auc <- median(auc_values, na.rm = TRUE)
+
+# Calculate summary statistics at each FPR point
+roc_summary <- interpolated_roc_data %>%
+  group_by(fpr) %>%
+  summarise(
+    tpr_min = min(tpr, na.rm = TRUE),
+    tpr_max = max(tpr, na.rm = TRUE),
+    tpr_median = median(tpr, na.rm = TRUE),
+    tpr_lower = quantile(tpr, 0.025, na.rm = TRUE),
+    tpr_upper = quantile(tpr, 0.975, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Extend the median curve to (0, 0) and (1, 1)
+roc_summary <- roc_summary %>%
+  add_row(fpr = 0, tpr_median = 0, .before = 1) %>%
+  add_row(fpr = 1, tpr_median = 1, .after = nrow(roc_summary))
+
+# Plot the dispersion using a ribbon, simulations, and median curve with textpath for AUC
+roc.plot_all.analytes <- ggplot() +
+  geom_ribbon(data = roc_summary, aes(x = fpr, ymin = tpr_lower, ymax = tpr_upper), fill = "purple", alpha = 0.3) +
+  geom_step(data = interpolated_roc_data, aes(x = fpr, y = tpr, group = simulation), color = "gray", alpha = 0.5, linewidth = 0.1) +
+  geom_textpath(data = roc_summary, aes(x = fpr, y = tpr_median, label = paste0("Median AUC = ", round(median_auc, 2))), 
+                color = "#007860", size = 1.8, linewidth = 0.2,  text_smoothing = 30, hjust = 1, vjust = -0.0001) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), size = 0.1) +
+  coord_fixed() +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7),
+    plot.title = element_text(size = 7,  margin = margin(t=0, r=0, b=0, l=0))
+   
+  ) +
+  labs(
+    title = "All analytes (r>0.75 excluded)",
+    x = "FPR",
+    y = "TPR"
+  )
+
+# Display the plot
+roc.plot_all.analytes
+
+# Save the plot as PNG
+pngfile <- fs::path("roc.plot_all.analytes.png")
+
+ggsave(
+  pngfile,
+  roc.plot_all.analytes,
+  device = ragg::agg_png,
+  width = 2,
+  height = 2,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r plot_glmmLasso_community.analytes}
+#| echo: false
+#| eval: false
+
+# Record the plot output for reproducibility
+gg_record(
+  device = "png",
+  width = 2,
+  height = 2,
+  unit = "in"
+)
+
+# Define common FPR points for alignment
+fpr_common <- seq(0, 1, length.out = 1000)  # Increased to 1000 points for smoother curves
+
+# Interpolate all ROC curves at the common FPR points
+interpolated_roc_data <- map_dfr(results_community.analytes$roc_curve, ~ {
+  tibble(
+    fpr = fpr_common,
+    tpr = approx(1 - .x$specificities, .x$sensitivities, xout = fpr_common)$y
+  )
+}, .id = "simulation")
+
+# Calculate the median AUC
+auc_values <-  results_community.analytes %>% pull(auc)
+median_auc <- median(auc_values, na.rm = TRUE)
+
+# Calculate summary statistics at each FPR point
+roc_summary <- interpolated_roc_data %>%
+  group_by(fpr) %>%
+  summarise(
+    tpr_min = min(tpr, na.rm = TRUE),
+    tpr_max = max(tpr, na.rm = TRUE),
+    tpr_median = median(tpr, na.rm = TRUE),
+    tpr_lower = quantile(tpr, 0.025, na.rm = TRUE),
+    tpr_upper = quantile(tpr, 0.975, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Extend the median curve to (0, 0) and (1, 1)
+roc_summary <- roc_summary %>%
+  add_row(fpr = 0, tpr_median = 0, .before = 1) %>%
+  add_row(fpr = 1, tpr_median = 1, .after = nrow(roc_summary))
+
+# Plot the dispersion using a ribbon, simulations, and median curve with textpath for AUC
+roc.plot_community.analytes <- ggplot() +
+  geom_ribbon(data = roc_summary, aes(x = fpr, ymin = tpr_lower, ymax = tpr_upper), fill = "purple", alpha = 0.3) +
+  geom_step(data = interpolated_roc_data, aes(x = fpr, y = tpr, group = simulation), color = "gray", alpha = 0.5, linewidth = 0.1) +
+  geom_textpath(data = roc_summary, aes(x = fpr, y = tpr_median, label = paste0("Median AUC = ", round(median_auc, 2))), 
+                color = "#007860", size = 1.8, linewidth = 0.2,  text_smoothing = 30, hjust = 1, vjust = -0.0001) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), size = 0.1) +
+  coord_fixed() +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7),
+    plot.title = element_text(size = 7,  margin = margin(t=0, r=0, b=0, l=0))
+   
+  ) +
+  labs(
+    title = "77 community analytes",
+    x = "FPR",
+    y = "TPR"
+  )
+
+# Display the plot
+roc.plot_community.analytes
+
+# Save the plot as PNG
+pngfile <- fs::path("roc.plot_community.analytes.png")
+
+ggsave(
+  pngfile,
+  roc.plot_community.analytes,
+  device = ragg::agg_png,
+  width = 2,
+  height = 2,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r plot_glmmLasso_predictive.analytes}
+#| echo: false
+#| eval: false
+
+# Record the plot output for reproducibility
+gg_record(
+  device = "png",
+  width = 2,
+  height = 2,
+  unit = "in"
+)
+
+# Define common FPR points for alignment
+fpr_common <- seq(0, 1, length.out = 1000)  # Increased to 1000 points for smoother curves
+
+# Interpolate all ROC curves at the common FPR points
+interpolated_roc_data <- map_dfr(results_predictive.analytes$roc_curve, ~ {
+  tibble(
+    fpr = fpr_common,
+    tpr = approx(1 - .x$specificities, .x$sensitivities, xout = fpr_common)$y
+  )
+}, .id = "simulation")
+
+# Calculate the median AUC
+auc_values <- results_predictive.analytes %>% pull(auc)
+median_auc <- median(auc_values, na.rm = TRUE)
+
+# Calculate summary statistics at each FPR point
+roc_summary <- interpolated_roc_data %>%
+  group_by(fpr) %>%
+  summarise(
+    tpr_min = min(tpr, na.rm = TRUE),
+    tpr_max = max(tpr, na.rm = TRUE),
+    tpr_median = median(tpr, na.rm = TRUE),
+    tpr_lower = quantile(tpr, 0.025, na.rm = TRUE),
+    tpr_upper = quantile(tpr, 0.975, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Extend the median curve to (0, 0) and (1, 1)
+roc_summary <- roc_summary %>%
+  add_row(fpr = 0, tpr_median = 0, .before = 1) %>%
+  add_row(fpr = 1, tpr_median = 1, .after = nrow(roc_summary))
+
+# Plot the dispersion using a ribbon, simulations, and median curve with textpath for AUC
+roc.plot_predictive.analytes <- ggplot() +
+  geom_ribbon(data = roc_summary, aes(x = fpr, ymin = tpr_lower, ymax = tpr_upper), fill = "purple", alpha = 0.3) +
+  geom_step(data = interpolated_roc_data, aes(x = fpr, y = tpr, group = simulation), color = "gray", alpha = 0.5, linewidth = 0.1) +
+  geom_textpath(data = roc_summary, aes(x = fpr, y = tpr_median, label = paste0("Median AUC = ", round(median_auc, 2))), 
+                color = "#007860", size = 1.8, linewidth = 0.2,  text_smoothing = 30, hjust = 1, vjust = -0.0001) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), size = 0.1) +
+  coord_fixed() +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7),
+    plot.title = element_text(size = 7,  margin = margin(t=0, r=0, b=0, l=0))
+   
+  ) +
+  labs(
+    title = "Top 12 analytes (≥300 simulations)",
+    x = "FPR",
+    y = "TPR"
+  )
+
+# Display the plot
+roc.plot_predictive.analytes
+
+# Save the plot as PNG
+pngfile <- fs::path("roc.plot_predictive.analytes.png")
+
+ggsave(
+  pngfile,
+  roc.plot_predictive.analytes,
+  device = ragg::agg_png,
+  width = 2,
+  height = 2,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r plot_glmmLasso_all.analytes_direct}
+#| echo: true
+#| eval: true
+#| fig-cap: "Figure 3b"
+
+knitr::include_graphics("roc.plot_all.analytes.png")
+```
+
+```{r plot_glmmLasso_community.analytes_direct}
+#| echo: true
+#| eval: true
+#| fig-cap: "Figure 3c"
+
+knitr::include_graphics("roc.plot_community.analytes.png")
+```
+
+```{r plot_glmmLasso_predictive.analytes_direct}
+#| echo: true
+#| eval: true
+#| fig-cap: "Figure 3d"
+
+knitr::include_graphics("roc.plot_predictive.analytes.png")
+```

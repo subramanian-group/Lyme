@@ -1,0 +1,977 @@
+---
+title: "Figure 4"
+editor_options: 
+  chunk_output_type: console
+format:
+  html:
+    warning: false     
+    message: false
+    cache: true
+    error: true
+    echo: true        
+    code-fold: true
+    code-tools: true
+---
+
+```{r}
+load("Data/All/Data.RData")
+```
+
+# Metabolomic
+#### Linear Model (LRT and Wilcox)
+
+```{r}
+pacman::p_load(lmtest)
+# factors
+# Remove metabolites missing in >=20% of data
+d = as.matrix(data$metabolon$pat_data)
+dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+pna = colSums(is.na(d))/nrow(d)*100
+keep2 = pna<20
+keep1 = dpab == 0
+d = d[keep1,keep2]
+age = data$metabolon$pat_pdata$Age_at_Time_of_Study_Entry[keep1]
+sex = data$metabolon$pat_pdata$Gender[keep1]
+sex = c("M","F")[match(sex,c("Male","Female"))]
+time = data$metabolon$pat_pdata$time[keep1]
+bmi = data$metabolon$pat_pdata$BMI[keep1]
+pulse = data$metabolon$pat_pdata$Pulse[keep1]
+id = data$metabolon$pat_pdata$Subject_ID[keep1]
+
+d = list(T1 = d[time == "T1",],
+         T2 = d[time == "T2",],
+         T3 = d[time == "T3",],
+         T4 = d[time == "T4",])
+d = lapply(d,as.data.frame)
+age = split(age,time)
+sex = split(sex,time)
+id = split(id,time)
+bmi = split(bmi,time)
+bmi$T2 = bmi$T1
+pulse = split(pulse,time)
+pulse$T2 = pulse$T1
+time = split(time,time)
+
+# mm = model.matrix( ~ 0 + factor(time[keep1]) + factor(sex[keep1]) + factor(age[keep1]))
+
+comps = list(c("T1","T2"),c("T1","T3"),c("T1","T4"),c("T2","T3"),c("T2","T4"),c("T3","T4"))
+rmat = data.frame(matrix(NA,nrow=ncol(d[[1]]),
+                         ncol = length(comps),
+                         dimnames = list(colnames(d[[1]]),
+                                         sapply(comps,paste0,collapse = " - "))))
+res_lm = list(wt = list(p = rmat,
+                        p.adj = rmat,
+                        logFC = rmat,
+                        coef = rmat),
+              lrt = list(p = rmat,
+                         p.adj = rmat,
+                         logFC = rmat,
+                         coef = rmat))
+for(i in 1:length(comps)){
+  comp1 = comps[[i]][1]
+  comp2 = comps[[i]][2]
+
+  ids = c(id[[comp1]],id[[comp2]])
+  keep = ids%in%ids[which(table(ids)==2)]
+  df = data.frame(ids = factor(paste0("L",ids[keep])),
+                  time = factor(c(rep(comp1,length(id[[comp1]])),
+                                  rep(comp2,length(id[[comp2]])))[keep],
+                                levels = c(comp2,comp1),
+                                ordered = T),
+                  sex = factor(c(sex[[comp1]],sex[[comp2]])[keep]),
+                  age = c(age[[comp1]],age[[comp2]])[keep],
+                  bmi = c(bmi[[comp1]],bmi[[comp2]])[keep],
+                  pulse = c(pulse[[comp1]],pulse[[comp2]])[keep])
+  x = rbind(d[[comp1]],d[[comp2]])[keep,]
+
+  for(j in 1:ncol(x)){
+    df2 = df
+    df2$m = x[,j]
+    df2 = na.omit(df2)
+    df2 = df2[df2$ids%in%df2$ids[which(table(df2$ids)==2)],]
+    # ggplot(df2,aes(x=time,y=m))+
+    #   geom_boxplot(outlier.shape = NA)+
+    #   geom_point(alpha = .6)+
+    #   geom_line(aes(group=ids),alpha=.4)+
+    #   theme_minimal()
+
+    id_inds = as.character(unique(df2$ids))
+    a = df2[df2$time==comp1,]
+    b = df2[df2$time==comp2,]
+    a = a[match(a$ids,b$ids),]
+    a = a$m
+    b = b$m
+    lfc = a-b
+    lfc = mean(lfc,na.rm=T)
+
+    if(comp2=="T2"){
+      fm = lm(m ~ time + ids, data = df2)
+    }else{
+      fm = lm(m ~ time + ids + bmi + pulse,data = df2)
+    }
+    wt = tryCatch(wald.test(b = coef(fm), Sigma = vcov(fm), df = fm$res_lmiduals, Terms = 2),
+                  error = function(e)return(NA))
+    if(!is.na(wt)){
+      res_lm$wt$p[j,i] =  wt$result$chi2[3]
+    }
+    res_lm$wt$coef[j,i] =  coef(fm)[2]
+    res_lm$wt$logFC[j,i] =  lfc
+
+    fm = lm(m ~ time + sex + ids + age + bmi + pulse, data = df2)
+    rm = lm(m ~ sex + ids + age + bmi + pulse, data = df2)
+    lrt = lrtest(fm, rm)
+    res_lm$lrt$p[j,i] = lrt$`Pr(>Chisq)`[2]
+    res_lm$lrt$coef[j,i] =  coef(fm)[2]
+    res_lm$lrt$logFC[j,i] =  lfc
+  }
+  res_lm$wt$p.adj[,i] =  p.adjust(res_lm$wt$p[,i],method = "BH")
+  res_lm$lrt$p.adj[,i] =  p.adjust(res_lm$lrt$p[,i],method = "BH")
+}
+
+# save(res_lm,file = "results/Metabolon/res_lm.RData")
+# load(file = "results/Metabolon/res_lm.RData")
+
+```
+
+#### Gather Differential Testing Results
+
+```{r}
+deg_res = list(#wilcox = res, t = res_t, 
+  lrt = res_lm$lrt, wald = res_lm$wt
+  #gt = res_gt
+  )
+# rm(list = c("res","res_t","res_lm","res_gt"))
+```
+
+### Pathway Analysis
+
+#### FELLA
+
+##### Build FELLA DB
+
+```{r}
+pacman::p_load(FELLA,igraph,magrittr)
+fella_dir = "data/metabolon/FELLA"
+
+# set.seed(1)
+# ##Filter the dre01100 overview pathway, as in the article
+# graph <- buildGraphFromKEGGREST(organism = "hsa", filter.path = c("01100"))
+# 
+# buildDataFromGraph(
+#   keggdata.graph = graph,
+#   databaseDir = fella_dir,
+#   internalDir = FALSE,
+#   matrices = c("hypergeom", "diffusion", "pagerank"),
+#   normality = c("diffusion", "pagerank"),
+#   dampingFactor = 0.85,
+#   niter = 100
+# )
+
+```
+
+##### Run analysis
+
+```{r}
+fella.data <- loadKEGGdata(
+  databaseDir = fella_dir,
+  internalDir = FALSE,
+  loadMatrix = c("diffusion", "pagerank")
+)
+
+generate_fella_tables = function(x){
+  diff <- generateResultsTable(
+    object = x,
+    method = "diffusion",
+    threshold = 0.1,
+    data = fella.data)
+  
+  hyper <- generateResultsTable(
+    object = x,
+    method = "hypergeom",
+    main = "T1 vs. T2",
+    threshold = 1,
+    data = fella.data)
+  
+  page <- generateResultsTable(
+    object = x,
+    method = "pagerank",
+    threshold = 0.1,
+    data = fella.data)
+  return(list(Diffusion = diff,Hypergeometric = hyper, PageRank = page))
+}
+
+
+p = deg_res$lrt$p
+lfc = deg_res$lrt$logFC
+fdata = data$metabolon$fdata[match(rownames(p),data$metabolon$fdata$BIOCHEMICAL_NAME),]
+p = p[fdata$KEGG!="",]
+fdata = fdata[fdata$KEGG!="",]
+lfc = lfc[rownames(p),]
+### fella results
+fella_res = list(both = list(),up=list(),down=list())
+fella_table = list(both = list(),up=list(),down=list())
+for(i in 1:6){
+  comp = colnames(p)[i]
+  background = gsub(",.*","",fdata$KEGG)
+  comp_both = gsub(",.*","",fdata$KEGG[p[,comp]<0.05])
+  comp_up = gsub(",.*","",fdata$KEGG[p[,comp]<0.05&lfc[,comp]>0])
+  comp_down = gsub(",.*","",fdata$KEGG[p[,comp]<0.05&lfc[,comp]<0])
+  fella_res$both[[i]] = enrich(
+    compounds = comp_both,
+    compoundsBackground = background,
+    method = listMethods(),
+    approx = "normality",
+    data = fella.data)
+  fella_res$up[[i]] = enrich(
+    compounds = comp_up,
+    compoundsBackground = background,
+    method = listMethods(),
+    approx = "normality",
+    data = fella.data)
+  fella_res$down[[i]] = enrich(
+    compounds = comp_down,
+    compoundsBackground = background,
+    method = listMethods(),
+    approx = "normality",
+    data = fella.data)
+  fella_table$both[[i]] = generate_fella_tables(fella_res$both[[i]])
+  fella_table$up[[i]] = generate_fella_tables(fella_res$up[[i]])
+  fella_table$down[[i]] = generate_fella_tables(fella_res$down[[i]])
+}
+names(fella_res$both) = gsub("\\.\\.\\."," - ",colnames(p))
+names(fella_res$up) = gsub("\\.\\.\\."," - ",colnames(p))
+names(fella_res$down) = gsub("\\.\\.\\."," - ",colnames(p))
+names(fella_table$both) = gsub("\\.\\.\\."," - ",colnames(p))
+names(fella_table$up) = gsub("\\.\\.\\."," - ",colnames(p))
+names(fella_table$down) = gsub("\\.\\.\\."," - ",colnames(p))
+```
+
+#### Gather Pathway Results
+
+```{r}
+pathway_res = list(
+  # Metaboanalyst = list(pathway = pathway,enrich=enrich),
+  #                  Hypergeometric = hyper_res,
+                   Fella = list(res = fella_res, tables = fella_table)
+                   )
+rm(pathway,enrich,hyper_res,fella.data,fella_res,fella_table)
+
+# ### Merge MetaboAnalyst P Values
+# paths = unlist(unique(sapply(pathway_res$Metaboanalyst$enrich,function(x)x$X)))
+# comps = names(pathway_res$Metaboanalyst$enrich)
+# met_table = matrix(nrow = length(paths),ncol = length(comps),dimnames = list(paths,comps))
+# for(i in 1:length(pathway_res$Metaboanalyst$enrich)){
+#   met_table[pathway_res$Metaboanalyst$enrich[[i]]$X,i] = pathway_res$Metaboanalyst$enrich[[i]]$Raw.p
+# }
+# up = met_table[,grep("Up",colnames(met_table))]
+# down = met_table[,grep("Down",colnames(met_table))]
+# both = met_table[,grep("Both",colnames(met_table))]
+# up[is.na(up)] = 1
+# down[is.na(down)] = 1
+# both[is.na(both)] = 1
+# colnames(up) = gsub(".Up","",colnames(up))
+# colnames(down) = gsub(".Down","",colnames(up))
+# colnames(both) = gsub(".Both","",colnames(up))
+# MetaboAnalyst = list(up=up,down=down,both=both)
+
+### Merge Fella P Values
+getFellaTable = function(x,type,keyword = "pathway"){
+  n = names(x)
+  if(type!="Hypergeometric"){
+    d = lapply(x,function(x)data.frame(x[[type]][x[[type]]$Entry.type==keyword,c("KEGG.name","p.score")]))
+    d[sapply(d,ncol)==0] = data.frame(KEGG.name = NA,p.score = NA,row.names = "missing")
+    d[sapply(d,ncol)==0] = rep(list(data.frame(KEGG.name = "missing",p.score = NA)),sum(sapply(d,ncol)==0))
+    d = lapply(d,function(x)x[!duplicated(x$KEGG.name),])
+  }else{
+    d = lapply(x,function(x)data.frame(x[[type]][,c("KEGG.name","p.value")]))
+    d[sapply(d,ncol)==0] = rep(list(data.frame(KEGG.name = "missing",p.value = NA)),sum(sapply(d,ncol)==0))
+  }
+  t = Reduce(function(x, y) merge(x, y, by="KEGG.name",all=T),d) %>% 
+    column_to_rownames("KEGG.name")
+  colnames(t) = n
+  t[is.na(t)] = 1
+  t = t[rownames(t)!="missing",]
+}
+
+
+# hyper_up = getFellaTable(x = pathway_res$Fella$tables$up,
+#                          type="Hypergeometric")
+# hyper_down = getFellaTable(x = pathway_res$Fella$tables$down,
+#                            type="Hypergeometric")
+# hyper_both = getFellaTable(x = pathway_res$Fella$tables$both,
+#                            type="Hypergeometric")
+# page_up = getFellaTable(x = pathway_res$Fella$tables$up,
+#                         type="PageRank")
+# page_down = getFellaTable(x = pathway_res$Fella$tables$down,
+#                           type="PageRank")
+# page_both = getFellaTable(x = pathway_res$Fella$tables$both,
+#                           type="PageRank")
+# diff_up = getFellaTable(x = pathway_res$Fella$tables$up,
+#                         type="Diffusion")
+# diff_down = getFellaTable(x = pathway_res$Fella$tables$down,
+#                           type="Diffusion")
+# diff_both = getFellaTable(x = pathway_res$Fella$tables$both,
+#                           type="Diffusion")
+
+# FELLA_paths = list(Hypergeometric = list(up = hyper_up,down = hyper_down,both=hyper_both),
+#                    PageRank = list(up = page_up, down = page_down, both = page_both),
+#                    Diffusion = list(up = diff_up, down = diff_down, both = diff_both))
+
+# hyper_up = getFellaTable(x = pathway_res$Fella$tables$up,
+#                          type="Hypergeometric",keyword = "module")
+# hyper_down = getFellaTable(x = pathway_res$Fella$tables$down,
+#                            type="Hypergeometric",keyword = "module")
+# hyper_both = getFellaTable(x = pathway_res$Fella$tables$both,
+#                            type="Hypergeometric",keyword = "module")
+page_up = getFellaTable(x = pathway_res$Fella$tables$up,
+                        type="PageRank",keyword = "module")
+# page_down = getFellaTable(x = pathway_res$Fella$tables$down,
+#                           type="PageRank",keyword = "module")
+# page_both = getFellaTable(x = pathway_res$Fella$tables$both,
+#                           type="PageRank",keyword = "module")
+# diff_up = getFellaTable(x = pathway_res$Fella$tables$up,
+#                         type="Diffusion",keyword = "module")
+# diff_down = getFellaTable(x = pathway_res$Fella$tables$down,
+#                           type="Diffusion",keyword = "module")
+# diff_both = getFellaTable(x = pathway_res$Fella$tables$both,
+#                           type="Diffusion",keyword = "module")
+
+# FELLA_modules = list(Hypergeometric = list(up = hyper_up,down = hyper_down,both=hyper_both),
+#                      PageRank = list(up = page_up, down = page_down, both = page_both),
+#                      Diffusion = list(up = diff_up, down = diff_down, both = diff_both))
+
+FELLA_modules = list(
+  # Hypergeometric = list(up = hyper_up, down = hyper_down, both = hyper_both),
+  PageRank = list(up = page_up)
+  # Diffusion = list(up = diff_up, down = diff_down, both = diff_both)
+)
+# ### Rearrange tables
+# Hypergeometric = pathway_res$Hypergeometric[c("up","down","both")]
+# Hypergeometric = lapply(Hypergeometric,function(x){
+#   colnames(x) = gsub("\\."," - ",colnames(x))
+#   x
+# })
+# MetaboAnalyst = lapply(MetaboAnalyst,function(x){
+#   colnames(x) = gsub("_"," - ",colnames(x))
+#   x
+# })
+
+# 
+# pathway_tables = list(MetaboAnalyst = MetaboAnalyst,
+#                       Hypergeometric = Hypergeometric,
+#                       FELLA_paths = FELLA_paths,
+#                       FELLA_modules = FELLA_modules)
+
+# Final table (only FELLA_modules retained)
+pathway_tables = list(
+  # MetaboAnalyst = MetaboAnalyst,
+  # Hypergeometric = Hypergeometric,
+  # FELLA_paths = FELLA_paths,
+  FELLA_modules = FELLA_modules
+)
+
+# rm(hyper_up,hyper_down,hyper_both,page_both,page_down,page_up,diff_both,diff_down,diff_up,up,down,both,comps,paths,MetaboAnalyst,Hypergeometric,FELLA_paths,FELLA_modules)
+```
+
+#### Pathway Viz
+
+##### Plot Pathway analysis results
+
+```{r}
+lp = list(title="-log10(p)",
+          legend_height=unit(5,"cm"),
+          title_gap = unit(300, "mm"),
+          legend_height=unit(5,"mm"),
+          legend_width=unit(2.5,"mm"),
+          labels_gp=gpar(fontsize=14),
+          grid_height = unit(10, "mm"),
+          grid_width = unit(10, "mm"),
+          title_position = "topcenter",
+          title_gp = gpar(fontsize = 16, fontface = "bold"))
+col_fun = circlize::colorRamp2(c(0, 6), c("white",'red'))
+col_fun = circlize::colorRamp2(c(0, 6), c("white",gg_color_hue(1)))
+
+######## UP
+
+d = pathway_tables$FELLA_modules$PageRank$up
+d = d[rowSums(d[,1:3]<0.05)>0,]
+# d = as.matrix(-log10(d))
+types = c("Arginine","Arginine","Energy","Sphingolipid","Energy","Ketones","Other","Glycan","Glycan","Tryptophan","Tryptophan","Other","Sphingolipid","Arginine","Other","Sphingolipid","Sphingolipid","Other","Energy","Other")
+hm = Heatmap(as.matrix(-log10(d)),cluster_columns = F,row_split = types,name = "-log10(p)",row_names_gp = gpar(fontsize=24),column_names_gp = gpar(fontsize=24),row_title_gp = gpar(fontsize=28),row_title_rot = 0)
+
+# png("./figures_final/Metabalon/Heatmap Pathway Up.png",width=500*3,height=400*3)
+hm = Heatmap(as.matrix(-log10(d)),
+             cluster_columns = F,
+             row_split = types,
+             name = "-log10(p)",
+             row_names_gp = gpar(fontsize=24),
+             column_names_gp = gpar(fontsize=24),
+             row_title_gp = gpar(fontsize=28),
+             row_title_rot = 0,
+             heatmap_legend_param = lp,
+             col = col_fun,)
+hm = ComplexHeatmap::draw(hm,
+                          padding = unit(c(2, 25,2, 150), "mm"),
+                          heatmap_legend_side = "left")
+hm
+dev.off()
+
+# ######### DOWN
+# 
+# d = pathway_tables$FELLA_modules$PageRank$down
+# d = d[rowSums(d[,1:3]<0.05)>0,]
+# # d = as.matrix(-log10(d))
+# types = c("Vitamin C", "Steroid", "Steroid", "Dopamine", "Vitamin C", "Caffiene", "Steroid", "Energy", "Uridine")
+# hm = Heatmap(as.matrix(-log10(d)),cluster_columns = F,row_split = types,name = "-log10(p)",row_names_gp = gpar(fontsize=24),column_names_gp = gpar(fontsize=24),row_title_gp = gpar(fontsize=28),row_title_rot = 0)
+# 
+# png("./figures_final/Metabalon/Heatmap Pathway Down.png",width=500*3,height=200*3)
+# hm = Heatmap(as.matrix(-log10(d)),
+#              cluster_columns = F,
+#              row_split = types,
+#              name = "-log10(p)",
+#              row_names_gp = gpar(fontsize=24),
+#              column_names_gp = gpar(fontsize=24),
+#              row_title_gp = gpar(fontsize=28),
+#              row_title_rot = 0,
+#              heatmap_legend_param = lp,
+#              col = col_fun,)
+# hm = ComplexHeatmap::draw(hm,
+#                           padding = unit(c(2, 25,2, 150), "mm"),
+#                           heatmap_legend_side = "left")
+# hm
+# dev.off()
+# 
+# # cn = colnames(d)
+# # rn = rownames(d)
+# # d$type = types
+# # d = d %>% rownames_to_column(var = "module") %>% pivot_longer(cols = cn, names_to = "contrast", values_to = "p")
+# # d$module = factor(d$module,levels = rn[order(types)])
+# # 
+# # ggplot(d, aes(x=contrast,y=module,size = -log10(p),color = -log10(p)))+geom_point()+theme_minimal()
+```
+
+##### Pathway Plotting Functions
+
+``` {r}
+pacman::p_load(ggprism)
+
+plot_path = function(x,main=NULL,nrow = NULL,
+                     ncol = NULL){
+  d = data$metabolon$pat_data
+  pd = data$metabolon$pat_pdata
+  dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+  d = d[dpab==0,mets]
+  pd = pd[dpab==0,]
+  if(length(mets)==1){
+    m = d
+    d = pd
+    d$metabolite = mets
+    d$value = m
+  }else{
+    d = cbind(d,pd)
+    d = pivot_longer(d,mets,names_to = "metabolite")
+  }
+  ggplot(d,aes(x = time, y = value)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    geom_point(alpha = .7) +
+    geom_line(aes(group = id), alpha = .5) +
+    facet_wrap(vars(metabolite),scales = 'free',nrow = nrow,
+               ncol = ncol)+
+    ylab("")+ggtitle(main)+
+    theme_minimal()
+}
+
+fix_pos = function(x,perc=.1){
+  ord = order(x,decreasing = F)
+  x2 = x[ord]
+  min_diff = abs(max(x2))*perc
+  for(i in 1:(length(x2)-1)){
+    if((x2[i+1]-x2[i])<min_diff){
+      x2[i+1] = x2[i]+min_diff
+    }
+  }
+  return(x2[ord])
+}
+
+prep_data = function(mets,sig_only,type="bar"){
+  d = data$metabolon$pat_data
+  pd = data$metabolon$pat_pdata
+  dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+  d = d[dpab==0,mets]
+  pd = pd[dpab==0,]
+  if(length(mets)==1){
+    m = d
+    d = pd
+    d$metabolite = mets
+    d$value = m
+  }else{
+    d = cbind(d,pd)
+    d = pivot_longer(d,mets,names_to = "metabolite")
+  }
+  
+  p_val_df = as.data.frame(t(deg_res$lrt$p.adj[mets,])) %>% rownames_to_column() %>% pivot_longer(cols = -1, names_to = "metabolite", values_to = "p.adj")
+  p_val_df$group1 = gsub("\\..*","",p_val_df$rowname)
+  p_val_df$group2 = gsub(".*T","T",p_val_df$rowname)
+  p_val_df = p_val_df[,-1]
+  p_val_df = p_val_df[p_val_df$p.adj<0.05,]
+  
+  if(type=="bar"){
+    d2 = d %>%
+      dplyr::group_by(metabolite,time) %>%
+      summarise( 
+        n=n(),
+        mean=mean(value,na.rm=T),
+        sd=sd(value,na.rm=T)
+      ) %>%
+      mutate( se=sd/sqrt(n))  %>%
+      mutate( ic=se * qt((1-0.05)/2 + .5, n-1))
+    
+    d2$metabolite = factor(d2$metabolite,levels=mets,ordered=T)
+    d2$dir = 'dec'
+    d2$dir[d2$mean>0] = 'inc'
+    d2$dir = factor(d2$dir,levels=c('dec','inc'),ordered=T)
+    p_val_df$y.position = apply(p_val_df,1,function(x){
+      keep = d2$time%in%c(x["group1"],x["group2"])&d2$metabolite==x["metabolite"]
+      ismax = which.max(d2$mean[keep])
+      max = d2$mean[keep][ismax]
+      sd = d2$sd[keep][ismax]
+      max+sd+.15*sd
+    })
+  }else{
+    p_val_df$y.position = apply(p_val_df,1,function(x){
+      keep = d$time%in%c(x["group1"],x["group2"])&d$metabolite==x["metabolite"]
+      ismax = which.max(d$value[keep])
+      max = d$value[keep][ismax]
+      max+.15*max
+    })
+  }
+  
+  for(i in 1:length(unique(p_val_df$metabolite))){
+    inds = which(p_val_df$metabolite==unique(p_val_df$metabolite)[i])
+    if(length(inds)>1){
+      p_val_df$y.position[inds] = fix_pos(p_val_df$y.position[inds],perc=.15)
+    }
+  }
+  p_val_df$p.adj = returnSigStars(p_val_df$p.adj)
+  p_val_df = as.data.frame(p_val_df)
+  
+  if(sig_only){
+    if(type=="bar"){
+      d2 = d2[d2$metabolite%in%p_val_df$metabolite,]
+      return(list(d2=d2,p_val_df=p_val_df))
+    }else if(type=="box"){
+      d = d[d$metabolite%in%p_val_df$metabolite,]
+      return(list(d=d,p_val_df=p_val_df))
+    }
+  }else{
+    if(type=="bar"){
+      return(list(d2=d2,p_val_df=p_val_df))
+    }else if(type=="box"){
+      return(list(d=d,p_val_df=p_val_df))
+    }
+  }
+}
+
+plot_bars = function(mets,save, sig_only = F){
+  dat = prep_data(mets,sig_only,type="bar")
+  d2 = dat$d2
+  p_val_df = dat$p_val_df
+  
+  # ggplot(d2,aes(x = metabolite, y = mean, fill = time)) +
+  p0 = ggplot(d2,aes(x = time, y = mean,fill=dir)) +
+    geom_bar(stat="identity", color="black",
+             position=position_dodge(),show.legend = F) +
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2,
+                  position=position_dodge(.9),col='grey30')+
+    scale_fill_manual(values = c('blue','red','green'))+
+    # geom_point(alpha = .7) +
+    # geom_line(aes(group = id), alpha = .5) +
+    facet_wrap(vars(metabolite),scales = 'free',ncol=5)+
+    ylab("log( x / median(x) )")+xlab("")+
+    # ggtitle(main)+
+    theme_minimal()
+  p0 = p0+add_pvalue(data = p_val_df)
+  
+  # if(!missing(save)){
+      if (!is.null(save)) {
+
+    png(save,width = length(mets)*800,height = ceiling(length(mets)/5)*1200)
+    p = ggplot(d2,aes(x = time, y = mean,fill=dir)) +
+      geom_bar(stat="identity", color="black",
+               position=position_dodge(),show.legend = F,cex=2) +
+      geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2,
+                    position=position_dodge(.9),cex=2,col='grey30')+
+      scale_fill_manual(values = c('blue','red','green'))+
+      scale_fill_manual(values = c(gg_color_hue(2)[2],gg_color_hue(2)[1],'green'))+
+      # geom_point(alpha = .7) +
+      # geom_line(aes(group = id), alpha = .5) +
+      facet_wrap(vars(metabolite),scales = 'free',ncol=5,
+                 labeller = label_wrap_gen(width = 20))+
+      # labeller = wrap_label(l=5))+
+      # ylab("")+ggtitle(main)+
+      ylab("log( x / median(x) )")+xlab("")+
+      theme_minimal(base_size = 72)
+    p = p + add_pvalue(data = p_val_df,bracket.size = 1.75,label.size = 14)
+    print(p)
+    dev.off()
+  }
+  p0
+}
+
+plot_boxes = function(mets,save,sig_only=F,lines=F){
+  dat = prep_data(mets,sig_only,type = "box")
+  d = dat$d
+  # d = d%>%group_by(metabolite,time)%>%mutate(box_dir = ifelse(median(value,na.rm = T)>0,"up","down"))
+  d = d%>%group_by(metabolite,time)%>%mutate(median = median(value,na.rm = T))
+  p_val_df = dat$p_val_df
+  p0 = ggplot(d,aes(x = time, y = value)) + 
+    geom_boxplot(aes(fill=median),outlier.shape = NA) + 
+    scale_fill_gradient2(low = gg_color_hue(2)[2],
+                         mid = "grey",
+                         high = gg_color_hue(2)[1])+
+    geom_point(alpha = .7) +
+    facet_wrap(vars(metabolite),scales = 'fixed', ncol = 5)+
+    xlab("")+ylab("log( x / median(x) )")+
+    theme_minimal()
+  if(lines) p0 = p0+geom_line(aes(group = Subject_ID), alpha = .25)
+  p0 = p0+add_pvalue(data = p_val_df)
+  
+  # if(!missing(save)){
+      if (!is.null(save)) {
+
+    png(save,width = length(mets)*800,height = ceiling(length(mets)/5)*1200)
+    p = ggplot(d,aes(x = time, y = value)) + 
+      geom_boxplot(aes(fill=median),outlier.shape = NA,cex=2,show.legend = F) + 
+      scale_fill_gradient2(low = gg_color_hue(2)[2],
+                           mid = "grey",
+                           high = gg_color_hue(2)[1])+
+      geom_point(alpha = .7) +
+      geom_point(alpha = .7,size=6,alpha=.5) +
+      facet_wrap(vars(metabolite),scales = 'fixed', ncol = 5,
+                 labeller = label_wrap_gen(width = 20))+
+      xlab("")+ylab("log( x / median(x) )")+
+      theme_minimal(base_size = 72)
+    if(lines) p0 = p0+geom_line(aes(group = Subject_ID), alpha = .25,cex=2)
+    p = p + add_pvalue(data = p_val_df,bracket.size = 1.75,label.size = 14)
+    print(p)
+    dev.off()
+  }
+  p0
+}
+
+len_wraps = function(x,l){
+  x = substring(x,                   
+                seq(1, nchar(x), l),
+                seq(l, nchar(x), l))
+  x = x[x!=""]
+  len = (length(x)-1)
+  x[1:len] = paste0(x[1:len],rep("\n",len))
+  x = paste0(x,collapse = "")
+  x
+}
+wrap_label = function(l = 15) 
+{
+  fun <- function(labels) {
+    labels <- label_value(labels)
+    lapply(labels, function(x) {
+      sapply(x,function(x){
+        ifelse(nchar(x)>l,len_wraps(x, l=l),x)
+      })
+    })
+  }
+  structure(fun, class = "labeller")
+}
+
+
+
+
+plot_lfc_hm = function(mets,...){
+  df = deg_res$lrt$logFC[mets,]
+  df = df[!grepl("^NA",rownames(df)),]
+  mets = rownames(df)
+  hc = hclust(dist(df))
+  df[deg_res$lrt$p[rownames(df),]>0.05]=NA
+  colnames(df) = gsub("\\.\\.\\."," - ",colnames(df))
+  Heatmap(as.matrix(df),cluster_columns = F,cluster_rows = hc,name = "logFC",...)
+}
+
+plot_cors = function(mets,...){
+  
+}
+
+
+cor_table = function(){
+  keep = data$metabolon$pat_pdata$days_of_prior_antibiotics==0 & data$metabolon$pat_pdata$time == "T1"
+  df = data$metabolon$pat_data[keep,]
+  df = df[,colSums(is.na(df))/nrow(df)<.2]
+  c = rcorr(as.matrix(df))
+  c
+}
+
+bubble_cor = function(mets1,mets2){
+  c = cor_table(metabolites = c(mets1,mets2))
+  mets1 = mets1[mets1%in%rownames(c$r)]
+  mets2 = mets2[mets2%in%rownames(c$r)]
+  r = c$r[mets1,mets2]
+  p = c$P[mets1,mets2]
+  hc1 = hclust(dist(r),method = "ward.D2")
+  hc2 = hclust(dist(t(r)),method = "ward.D2")
+  o1 = rownames(r)[hc1$order]
+  o2 = colnames(r)[hc2$order]
+  rl = as.data.frame(r)%>%rownames_to_column(var='y') %>% pivot_longer(cols = colnames(r), values_to = 'r',names_to = 'x')
+  pl = as.data.frame(p)%>%rownames_to_column(var='y') %>% pivot_longer(cols = colnames(p), values_to = 'p',names_to = 'x')
+  d = data.frame(rl,p=pl$p)
+  d$y = factor(d$y,levels = o1,ordered = T)
+  d$x = factor(d$x,levels = o2,ordered = T)
+  d$sig = returnSigStars(d$p)
+  d$sig[d$sig=="ns"] = ""
+  breaks = seq(-1,1,length.out=1000)
+  cols = circlize::colorRamp2(c(-1, 0, 1), c("blue", "white","red"))(breaks)
+  ggplot(d,aes(x=x,y=y,size=-log10(p),col=r,label=sig))+
+    geom_point()+
+    scale_color_gradient2(,low = 'blue',high='red',limits=c(-1,1))+
+    geom_text(col='black')+
+    scale_x_discrete(expand = c(.1,.1))+
+    xlab("")+
+    ylab("")+
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45,hjust = 1))
+}
+
+plot_hm = function(mets){
+  d = data$metabolon$pat_data
+  pd = data$metabolon$pat_pdata
+  dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+  d = d[dpab==0,mets]
+  pd = pd[dpab==0,]
+  time = factor(pd$time,levels = paste0("T",1:4),ordered = T)
+  Heatmap(as.matrix(d),split = time)
+}
+
+
+cor_table_all = function(times="T1",values){
+  ## Metabolon data
+  d_met = data$metabolon$pat_data
+  p_met = data$metabolon$pat_pdata
+  if(!missing(values)){
+    vals = values[values%in%colnames(data$metabolon$pat_data)]
+    rn = rownames(d_met)
+    d_met = data.frame(d_met[,vals])
+    colnames(d_met) = vals
+    rownames(d_met) = rn
+  }
+  dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+  pna = colSums(is.na(d_met))/nrow(d_met)*100
+  keep2 = pna<20
+  keep1 = dpab == 0 | data$metabolon$pat_pdata$time %in% c("T3","T4")
+  # d_met = d_met[keep1,keep2]
+  
+  rn = rownames(d_met)
+  d_met = data.frame(d_met[keep1,keep2])
+  colnames(d_met) = vals[keep2]
+  rownames(d_met) = rn[keep1]
+  
+  p_met = p_met[keep1,]
+  time = p_met$time
+  all_cors = list()
+  for(i in 1:length(times)){
+    d_met2 = d_met[time == times[i],]
+    ## flow + olink data
+    if(times[i]=="T1"|times[i]=="T3"){
+      d_olink = cbind(flow$data$assayData[rownames(d_met2),],flow$data$olinkNewFail[rownames(d_met2),])
+    }else{
+      d_olink = flow$data$assayData[rownames(d_met2),]
+    }
+    d_flow = flow$propsWide[rownames(d_met2),]
+    
+    if(!missing(values)){
+      vals = values[values%in%colnames(d_flow)]
+      d_flow = d_flow[,vals]
+      vals = values[values%in%colnames(d_olink)]
+      d_olink = d_olink[,vals]
+    }
+    
+    keep = rowSums(sapply(list(d_met2,d_olink,d_flow),function(x)rowSums(is.na(x))<ncol(x)))==3
+    d_met2 = d_met2[keep,]
+    d_flow = d_flow[keep,]
+    d_olink = d_olink[keep,]
+    
+    
+    cors = rcorr(as.matrix(cbind(d_met2,d_olink,d_flow)),type = "spearman")
+    
+    fd_full = data$metabolon$fdata
+    
+    r = cors$r[colnames(d_met2),]
+    p = cors$P[colnames(d_met2),]
+    type = c(rep("Metabolite",ncol(d_met2)),rep("Olink",ncol(d_olink)),rep("Flow",ncol(d_flow)))
+    
+    all_cors[[i]] = list(r=r,p=p,type = type)
+  }
+  names(all_cors) = times
+  return(all_cors)
+}
+
+
+
+cor_table = function(time="T1",metabolites = NULL,proteins = NULL,cells = NULL,filter=T,type="pearson"){
+  ## Metabolon data
+  ids = table(c(rownames(data$metabolon$pat_data),
+                rownames(cbind(data$assayData,data$olinkNew)),
+                rownames(flow$propsWide)))
+  ids = names(ids)[ids==3]
+  
+  d_met = NA
+  d_olink = NA
+  d_flow = NA
+  
+  if(!missing(metabolites)) d_met = data$metabolon$pat_data[ids,metabolites]
+  if(!missing(proteins)) d_olink = cbind(data$assayData,data$olinkNew)[ids,proteins]
+  if(!missing(cells)) d_flow = flow$propsWide[ids,cells]
+  
+  d = list(met = d_met,olink = d_olink,flow = d_flow)
+  
+  if(length(metabolites)==1) d$met = data.frame(matrix(d$met,ncol = 1,
+                                                       dimnames=list(ids,metabolites)))
+  if(length(proteins)==1) d$olink = data.frame(matrix(d$olink,ncol = 1,
+                                                      dimnames=list(ids,proteins)))
+  if(length(cells)==1) d$flow = data.frame(matrix(d$flow,ncol = 1,
+                                                  dimnames=list(ids,cells)))
+  
+  if(missing(metabolites)) d = d[names(d)!="met"]
+  if(missing(proteins)) d = d[names(d)!="olink"]
+  if(missing(cells)) d = d[names(d)!="flow"]
+  
+  d = do.call(cbind,d)
+  colnames(d) = gsub("^met\\.|^olink\\.|^flow\\.","",colnames(d))
+  pd = data$sampleData[rownames(d),]
+  d = d[pd$time%in%time,]
+  pd = pd[pd$time%in%time,]
+  
+  if(time%in%c("T1","T2")){
+    d = d[pd$days_of_prior_antibiotics==0,]
+    pd = pd[pd$days_of_prior_antibiotics==0,]
+  }
+  
+  if(filter){
+    pna = colSums(is.na(d))/nrow(d)*100
+    keep2 = pna<20
+    d = d[,keep2]
+  }
+  
+  c = rcorr(as.matrix(d),type = type)
+  
+  return(list(d = d, c = c))
+}
+```
+
+###### Ketosis Shift
+
+```{r}
+# mets = c(bg$BIOCHEMICAL_NAME[bg$SUB_PATHWAY%in%"Ketone Bodies"])
+mets = c("3-hydroxybutyrate (BHBA)","acetoacetate","glucose")
+# plot_lfc_hm(mets)
+# # plot_path(mets)
+# plot_bars(mets,save="figures_final/Metabalon/BarPlot_Ketosis.png")
+plot_boxes(mets)
+
+# mets2 = c("3-hydroxybutyrate (BHBA)","acetoacetate","glucose")
+# mets1 = grep("carnitine",data$metabolon$fdata$BIOCHEMICAL_NAME,value=T)
+# bubble_cor(mets1,mets2)
+
+# ### Shift to glutamine (from ketones) ?
+# mets2 = c("3-hydroxybutyrate (BHBA)","acetoacetate","glucose")
+# mets1 = grep("glutamine",data$metabolon$fdata$BIOCHEMICAL_NAME,value=T)
+# bubble_cor(mets1,mets2)
+
+# plot_bars(mets)
+
+```
+
+
+
+###### Sphingolipids
+
+```{r}
+# x = bg$BIOCHEMICAL_NAME[bg$SUB_PATHWAY==path2plot]
+# sphinganine = c(grep("sphingan",bg$BIOCHEMICAL_NAME,value=T,ignore.case = T),"palmitoylcarnitine (C16)")
+# # sphinganine = c("sphinganine","sphinganine-1-phosphate")
+# ceramide = grep("ceram",bg$BIOCHEMICAL_NAME,value=T,ignore.case = T)[-3]
+# sphingomyelin = grep("sphingomy",bg$BIOCHEMICAL_NAME,value=T,ignore.case = T)
+# sphingosine = c(grep("sphingos",bg$BIOCHEMICAL_NAME,value=T,ignore.case = T),"phosphoethanolamine")
+mets = c("palmitoylcarnitine (C16)","sphinganine","sphingosine","sphingosine 1-phosphate","phosphoethanolamine")
+
+# plot_bars(mets,save="figures_final/Metabalon/BarPlot_Sphinolipids.png")
+# plot_bars(ceramide,save="figures_final/Metabalon/BarPlot_Ceramide.png")
+
+# col_fun = circlize::colorRamp2(c(-1, 0, 1), c("blue", "white","red"))
+# plot_lfc_hm(sphinganine,col = col_fun)
+# plot_lfc_hm(ceramide,col = col_fun)
+# plot_lfc_hm(sphingomyelin,col = col_fun)
+# plot_lfc_hm(sphingosine,col = col_fun)
+col_fun = circlize::colorRamp2(c(-.5, 0, .5), c("blue", "white","red"))
+plot_lfc_hm(mets,col = col_fun)
+
+
+# bubble_cor(mets,mets)
+# bubble_cor(mets,keto)
+# bubble_cor(lc,mets)
+# bubble_cor(mc,mets)
+# bubble_cor(sc,mets)
+```
+
+###### Tryptophan
+
+```{r}
+mets = c("tryptophan","kynurenine","kynurenate","quinolinate","indoleacetate","indolelactate","3-indoxyl sulfate")
+# cor_with = c("phenylpyruvate","phenylalanine","hydantoin-5-propionate")
+# tryp = "tryptophan"
+# up = c("kynurenine","quinolinate","nicotinamide")
+# nc = c("kynurenate","indoleacetate","indolelactate","3-indoxyl sulfate")
+# 
+# 
+# plot_bars(tryp,"figures_final/Metabalon/BarPlot_Tryp.png")
+# plot_bars(up,"figures_final/Metabalon/BarPlot_Kyn.png")
+# plot_bars(nc,"figures_final/Metabalon/BarPlot_Indoles.png")
+# 
+# plot_path(tryp)
+# plot_path(c(tryp,up))
+# plot_path(nc)
+plot_lfc_hm(mets)
+```
+
+###### Gather all up and Plot
+
+```{r}
+keto = c("3-hydroxybutyrate (BHBA)","acetoacetate")
+# carnitines = grep("carnitine",bg$BIOCHEMICAL_NAME,ignore.case = T,value=T)
+# carnitines = carnitines[grep(".*\\(C.*\\)",carnitines)]
+# len = gsub(".*\\(C(.*)\\).*","\\1",carnitines)
+# len = gsub("(.*):.*","\\1",len)
+# len = gsub(".DC","",len)
+# len = as.numeric(len)
+# carnitines = carnitines[order(len)]
+# len = len[order(len)]
+# # acetyl = "acetylcarnitine (C2)"
+# mc = carnitines[len>6&len<13]
+# lc = carnitines[len>13]
+sphing = c("sphingosine","sphingosine 1-phosphate","phosphoethanolamine")
+tryp = c(#"kynurenine",
+         "quinolinate", "tryptophan")
+
+
+mets_up = list(Ketones = keto,
+               Sphingolipids = sphing, 
+               # `Long Chain Acyl-Carnitines` = lc,
+               # `Medium Chain Acyl-Carnitines` = mc,
+               `Tryptophan IDO1 Metabolism` = tryp)
+
+# plot_bars(mets_up$Ketones, save = NULL)
+plot_boxes(mets_up$Ketones,save = NULL)
+# plot_bars(mets_up$Sphingolipids, save = "figures_final/Metabalon/BarPlot_Sphingolipids.png")
+plot_boxes(mets_up$Sphingolipids, save = "NULL")
+# plot_bars(mets_up$`Tryptophan IDO1 Metabolism`, save = "figures_final/Metabalon/BarPlot_Tryptophan IDO1 Metabolism.png") #Wickstrom et. al (2021) & Halperin et al (1992)
+plot_boxes(mets_up$`Tryptophan IDO1 Metabolism`, save = "NULL")
+# plot_bars(mets_up$`Long Chain Acyl-Carnitines`[c(1:10,12:16,21:24)],sig_only = T)
+# plot_bars(mets_up$`Medium Chain Acyl-Carnitines`[c(1:2,4:9)],sig_only = T)
+
+```

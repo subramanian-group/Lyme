@@ -1,0 +1,756 @@
+---
+title: "Untitled"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  library(tidyverse),
+  library(patchwork),
+  library(limma),
+  library(ComplexHeatmap),
+  library(clusterProfiler),
+  library(Hmisc),
+  library(ggraph),
+  library(ggrepel)
+)
+```
+
+## Load Functions
+
+```{r load_functions, results='hide'}
+# Functions ---------------------------------------------------------------
+source(file = "./R/General Functions.R")
+
+returnSigStars = function(x){
+  x2 = x
+  x2[is.numeric(x) & x > 0.05] = "ns"
+  x2[is.numeric(x) & x < 0.05] = "*"
+  x2[is.numeric(x) & x < 0.01] = "**"
+  x2[is.numeric(x) & x < 0.001] = "***"
+  x2[is.numeric(x) & x < 0.0001] = "****"
+  x2
+}
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+palBias = function(x){
+  if(abs(x)>1){
+    break("x must be between -1 and 1")
+  }
+  cool = rainbow(500, start=rgb2hsv(col2rgb('cyan'))[1], end=rgb2hsv(col2rgb('blue'))[1])
+  warm = rainbow(500, start=rgb2hsv(col2rgb('red'))[1], end=rgb2hsv(col2rgb('yellow'))[1])
+  cols = c(rev(cool), rev(warm))
+  if(x<0){
+    cols = cols[ceiling(abs(x)*500):1000]
+  }else{
+    cols = cols[1:ceiling(500+500*(1-x))]
+  }
+  colorRampPalette(cols)(255)
+}
+
+fixNames = function(x){
+  x = gsub("\\..*","",x)
+  x = gsub("-","",x)
+  x = gsub("/.*","",x)
+  x = gsub("\\(.*","",x)
+  x = toupper(x)
+  alias = alias2SymbolTable(x)
+  x[!is.na(alias)] = alias[!is.na(alias)]
+  x
+}
+
+cos.sim = function(x){
+  res = matrix(ncol = ncol(x),nrow = ncol(x))
+  dimnames(res) = list(colnames(x),colnames(x))
+  x = as.data.frame(x)
+  res = mapply(function(xi,i){
+    mapply(function(xj,j){
+      sim = xi%*%xj/(sqrt(sum((xi)^2))*sqrt(sum((xj)^2)))
+      res[i,j] = sim
+      res[j,i] = sim
+    },x,1:ncol(x))
+  },x,1:ncol(x))
+  res
+}
+
+na.omit.all = function(x,MAR=c(1,2)){
+  if(MAR==1){
+    x[apply(x,1,function(x)sum(!is.na(x))>0),]
+  }else if(MAR==2){
+    x[,apply(x,2,function(x)sum(!is.na(x))>0)]
+  }else{
+    x[apply(x,1,function(x)sum(!is.na(x))>0),
+      apply(x,2,function(x)sum(!is.na(x))>0)]
+  }
+}
+
+rcorr.nodups = function(x,y,...){
+  c = rcorr(x,y,...)
+  rows = 1:ncol(x)
+  cols = (ncol(x)+1):(ncol(x)+ncol(y))
+  c$r = c$r[rows,cols]
+  c$n = c$n[rows,cols]
+  c$P = c$P[rows,cols]
+  c
+}
+
+coord_radar <- function (theta = "x", start = 0, direction = 1) 
+{
+  theta <- match.arg(theta, c("x", "y"))
+  r <- if (theta == "x") 
+    "y"
+  else "x"
+  
+  #dirty
+  rename_data <- function(coord, data) {
+    if (coord$theta == "y") {
+      plyr::rename(data, c("y" = "theta", "x" = "r"), warn_missing = FALSE)
+    } else {
+      plyr::rename(data, c("y" = "r", "x" = "theta"), warn_missing = FALSE)
+    }
+  }
+  theta_rescale <- function(coord, x, scale_details) {
+    rotate <- function(x) (x + coord$start) %% (2 * pi) * coord$direction
+    rotate(scales::rescale(x, c(0, 2 * pi), scale_details$theta.range))
+  }
+  
+  r_rescale <- function(coord, x, scale_details) {
+    scales::rescale(x, c(0, .4), scale_details$r.range)
+  }
+  
+  ggproto("CordRadar", CoordPolar, theta = theta, r = r, start = start, 
+          direction = sign(direction),
+          is_linear = function(coord) TRUE,
+          render_bg = function(self, scale_details, theme) {
+            scale_details <- rename_data(self, scale_details)
+            
+            theta <- if (length(scale_details$theta.major) > 0)
+              theta_rescale(self, scale_details$theta.major, scale_details)
+            thetamin <- if (length(scale_details$theta.minor) > 0)
+              theta_rescale(self, scale_details$theta.minor, scale_details)
+            thetafine <- seq(0, 2 * pi, length.out = 100)
+            
+            rfine <- c(r_rescale(self, scale_details$r.major, scale_details))
+            
+            # This gets the proper theme element for theta and r grid lines:
+            #   panel.grid.major.x or .y
+            majortheta <- paste("panel.grid.major.", self$theta, sep = "")
+            minortheta <- paste("panel.grid.minor.", self$theta, sep = "")
+            majorr     <- paste("panel.grid.major.", self$r,     sep = "")
+            
+            ggplot2:::ggname("grill", grid::grobTree(
+              ggplot2:::element_render(theme, "panel.background"),
+              if (length(theta) > 0) ggplot2:::element_render(
+                theme, majortheta, name = "angle",
+                x = c(rbind(0, 0.45 * sin(theta))) + 0.5,
+                y = c(rbind(0, 0.45 * cos(theta))) + 0.5,
+                id.lengths = rep(2, length(theta)),
+                default.units = "native"
+              ),
+              if (length(thetamin) > 0) ggplot2:::element_render(
+                theme, minortheta, name = "angle",
+                x = c(rbind(0, 0.45 * sin(thetamin))) + 0.5,
+                y = c(rbind(0, 0.45 * cos(thetamin))) + 0.5,
+                id.lengths = rep(2, length(thetamin)),
+                default.units = "native"
+              ),
+              
+              ggplot2:::element_render(
+                theme, majorr, name = "radius",
+                x = rep(rfine, each = length(thetafine)) * sin(thetafine) + 0.5,
+                y = rep(rfine, each = length(thetafine)) * cos(thetafine) + 0.5,
+                id.lengths = rep(length(thetafine), length(rfine)),
+                default.units = "native"
+              )
+            ))
+          })
+}
+
+### adapted from diffcyt
+
+testDA_edgeR <- function(counts,cluster_id, design, contrast, 
+                         trend_method = "none", 
+                         min_cells = 3, min_samples = NULL, 
+                         normalize = T, norm_factors = "TMM") {
+  
+  if (is.null(min_samples)) {
+    min_samples <- ncol(counts) / 2
+  }
+  
+  if(missing(cluster_id)){
+    cluster_id = rownames(counts)
+  }
+  
+  cluster_id_all = cluster_id
+  
+  # filtering: keep clusters with at least 'min_cells' cells in at least 'min_samples' samples
+  tf <- counts >= min_cells
+  ix_keep <- apply(tf, 1, function(r) sum(r) >= min_samples)
+  
+  counts <- counts[ix_keep, , drop = FALSE]
+  cluster_id <- cluster_id[ix_keep]
+  
+  # edgeR pipeline
+  
+  # normalization factors
+  if (normalize & norm_factors == "TMM") {
+    norm_factors <- calcNormFactors(counts, method = "TMM")
+  }
+  
+  # note: when using DGEList object, column sums are automatically used for library sizes
+  if (normalize) {
+    y <- DGEList(counts, norm.factors = norm_factors)
+  } else {
+    y <- DGEList(counts)
+  }
+  
+  # estimate dispersions
+  # (note: using 'trend.method = "none"' by default)
+  y <- estimateDisp(y, design, trend.method = trend_method)
+  
+  # fit models
+  fit <- glmFit(y, design)
+  
+  # likelihood ratio tests
+  resList = list()
+  for(i in 1:ncol(contrast)){
+    lrt <- glmLRT(fit, contrast = contrast[,i])
+    top <- edgeR::topTags(lrt, n = Inf, adjust.method = "BH", sort.by = "none")
+    row_data = top$table
+    if(length(cluster_id)!=length(cluster_id_all)){
+      missing_clusts = cluster_id_all[!cluster_id_all%in%cluster_id]
+      missing = matrix(nrow = length(missing_clusts),ncol = ncol(row_data))
+      rownames(missing) = missing_clusts
+      colnames(missing) = colnames(top)
+      row_data = rbind(row_data,missing)
+      row_data = row_data[cluster_id_all,]
+    }
+    resList[[i]] = row_data
+  }
+  names(resList) = colnames(contrast)
+  
+  
+  logFCFrame = do.call(cbind,lapply(resList,function(x)x[,"logFC"]))
+  colnames(logFCFrame) = colnames(contrast)
+  rownames(logFCFrame) = cluster_id_all
+  
+  adjpFrame = do.call(cbind,lapply(resList,function(x)x[,"FDR"]))
+  colnames(adjpFrame) = colnames(contrast)
+  rownames(adjpFrame) = cluster_id_all
+  
+  pFrame = do.call(cbind,lapply(resList,function(x)x[,"PValue"]))
+  colnames(pFrame) = colnames(contrast)
+  rownames(pFrame) = cluster_id_all
+  
+  list(p.adjFrame = adjpFrame,pFrame = pFrame,logFCFrame = logFCFrame)
+}
+
+
+### Adapted from diffcyt
+
+testDS_limma <- function(d_counts, d_medians, design, contrast, 
+                         block_id = NULL, trend = TRUE, weights = TRUE, 
+                         markers_to_test = NULL, 
+                         min_cells = 3, min_samples = NULL, 
+                         plot = FALSE, path = ".") {
+  
+  if (!is.null(block_id) & !is.factor(block_id)) {
+    block_id <- factor(block_id, levels = unique(block_id))
+  }
+  
+  if (is.null(min_samples)) {
+    min_samples <- ncol(d_counts) / 2
+  }
+  
+  # markers to test
+  if (!is.null(markers_to_test)) {
+    markers_to_test <- markers_to_test
+  } else {
+    # vector identifying 'cell state' markers in list of assays
+    markers_to_test <- metadata(d_medians)$id_state_markers
+  }
+  
+  # note: counts are only required for filtering
+  counts <- d_counts
+  cluster_id <- rownames(d_counts)
+  
+  # filtering: keep clusters with at least 'min_cells' cells in at least 'min_samples' samples
+  tf <- counts >= min_cells
+  ix_keep <- apply(tf, 1, function(r) sum(r) >= min_samples)
+  
+  counts <- counts[ix_keep, , drop = FALSE]
+  cluster_id <- cluster_id[ix_keep]
+  
+  # extract medians and create concatenated matrix
+  state_names <- names(assays(d_medians))[markers_to_test]
+  meds <- do.call("rbind", {
+    lapply(as.list(assays(d_medians)[state_names]), function(a) a[as.character(cluster_id), , drop = FALSE])
+  })
+  meds_all <- do.call("rbind", as.list(assays(d_medians)[state_names]))
+  
+  
+  rownames(meds) = paste0(rep(state_names,each=length(cluster_id))," - ",rep(cluster_id,length(state_names)))
+  rownames(meds_all) = paste0(rep(state_names,each=nrow(d_counts))," - ",rep(sort(rownames(d_counts)),length(state_names)))
+  # limma pipeline
+  
+  # estimate correlation between paired samples
+  # (note: paired designs only; >2 measures per sample not allowed)
+  if (!is.null(block_id)) {
+    dupcor <- duplicateCorrelation(meds, design, block = block_id)
+  }
+  
+  # weights: cluster cell counts (repeat for each marker)
+  if (weights) {
+    weights <- counts[as.character(rep(cluster_id, length(state_names))), ]
+    stopifnot(nrow(weights) == nrow(meds))
+  } else {
+    weights <- NULL
+  }
+  
+  # fit models
+  if (!is.null(block_id)) {
+    message("Fitting linear models with random effects term for 'block_id'.")
+    fit <- lmFit(meds, design, weights = weights, 
+                 block = block_id, correlation = dupcor$consensus.correlation)
+  } else {
+    fit <- lmFit(meds, design, weights = weights)
+  }
+  fit <- contrasts.fit(fit, contrast)
+  
+  # calculate moderated tests
+  efit <- eBayes(fit, trend = trend)
+  
+  # results
+  tops = lapply(colnames(contrast),function(x)topTable(efit, coef = x, number = Inf, adjust.method = "BH", sort.by = "none"))
+  names(tops) = colnames(contrast)
+  
+  logFCFrame = sapply(tops,function(x)x$logFC)
+  rownames(logFCFrame) = rownames(tops[[1]])
+  adj.pFrame = sapply(tops,function(x)x$adj.P.Val)
+  rownames(adj.pFrame) = rownames(tops[[1]])
+  
+  list(logFCFrame = logFCFrame,adj.pFrame = adj.pFrame,meds = meds)
+}
+
+plot_pca = function(pca,color,components=c(1,2),label=F,n=10,scale = 5,draw_loadings = F,
+                    legendSize = unit(3,'mm')){
+  d = data.frame(comp1 = pca$x[,components[1]],
+                 comp2 = pca$x[,components[2]],
+                 color=color,
+                 label = rownames(pca$x))
+  
+  vars = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
+  loadings = data.frame(t(apply(pca$rotation,1,function(x)x*pca$sdev))[,components],
+                        x=rep(0,nrow(pca$rotation)),
+                        y=rep(0,nrow(pca$rotation)))
+  loadings$label = rownames(loadings)
+  keep = order(loadings[,components[1]]^2+loadings[,components[2]]^2,decreasing=T)[1:n]
+  loadings = loadings[keep,]
+  legendSize = unit(3,'mm')
+  
+  if(label){
+    p = ggplot(d,aes(x=comp1,y=comp2,color=color,label=label))
+    if(draw_loadings){
+      labs = data.frame(x=c(d[,components[1]],scale*loadings[,1]),
+                        y=c(d[,components[2]],scale*loadings[,2]+sign(scale*loadings[,2])*0.5),
+                        label = c(d$label,loadings$label),
+                        color = c(as.character(d$color),rep("var",nrow(loadings))))
+      p = p + ggrepel::geom_label_repel(labs,
+                                        mapping = aes(x=x,y=y,label=label,color=color),
+                                        inherit.aes = F,
+                                        col = c(gg_color_hue(length(unique(labs$color))-1),"black")[match(labs$color, c(unique(labs$color)[unique(labs$color)!="var"],"var"))],
+                                        max.overlaps = 30,
+                                        size = 15)+
+        geom_segment(loadings,
+                     mapping = aes(x=x,y=y,xend=scale*(x+PC1),yend=scale*(y+PC2)),
+                     inherit.aes = F,
+                     arrow = arrow(length = unit(1,"cm")),size=2)
+    }
+  }else{
+    p = ggplot(d,aes(x=comp1,y=comp2,color=color))+geom_point(size=15)
+    if(draw_loadings){
+      labs = data.frame(x=c(scale*loadings[,1]),
+                        y=c(scale*loadings[,2]),
+                        label = c(loadings$label),
+                        color = c(rep("var",nrow(loadings))))
+      p = p +
+        geom_segment(loadings,
+                     mapping = aes(x=x,y=y,xend=scale*(x+PC1),yend=scale*(y+PC2)),
+                     inherit.aes = F,
+                     arrow = arrow(length = unit(1,"cm")),size=2)+
+        ggrepel::geom_label_repel(labs,
+                                  mapping = aes(x=x,y=y,label=label),
+                                  inherit.aes = F,
+                                  col = 'black',
+                                  max.overlaps = 30,
+                                  size = 15)
+    }
+  }
+  
+  p = p +
+    xlab(vars[components[1]])+
+    ylab(vars[components[2]])+
+    guides(color = guide_legend(title="",byrow = TRUE))+
+    theme(legend.key.size = legendSize,
+          axis.text = element_blank(),
+          plot.title = element_text(hjust = 0.5),
+          legend.spacing.y = unit(3, 'cm'))+
+    theme_minimal(base_size = 60)
+}
+
+```
+
+```{r}
+load("data/OlinkPreprocessed.RData")
+```
+
+##
+
+```{r prior_anitbiotic}
+data$sampleData |> filter(time == "T1", Condition == "Patient") |> 
+    ggplot(aes(x = days_of_prior_antibiotics)) +
+    geom_bar() +
+    xlab("Days of Prior Antibiotics") +
+    ylab("Frequency")
+```
+
+
+## Differential Expression
+
+```{r setUpFactors}
+# Set up factors ----------------------------------------------------------
+factors = data$sampleData[!is.na(data$sampleData$time), c("Subject_ID","time","days_post_ab")]
+colnames(factors) = c("Patient","Time","DaysPostAB")
+factors$Patient = as.factor(factors$Patient)
+factors$Time = as.factor(factors$Time)
+factors$Type = rep("p",dim(factors)[1])
+factors$Type[grep("^11|^21",rownames(factors))] = "c"
+factors$Type = as.factor(factors$Type)
+factors$naive = rep(F,dim(factors)[1])
+factors$naive[factors$Patient%in%unique(factors$Patient[factors$DaysPostAB==0])] = T
+levels(factors$Time) = c(levels(factors$Time),"TC")
+factors$Time[factors$Type=="c"] = "TC"
+factors$number_of_em = data$emData[rownames(factors),"Number_of_EM_at_Baseline"]
+factors$em_dimension = data$emData[rownames(factors),"largest_EM_Dimension"]
+factors$age = data$sampleData[rownames(factors),"Age_at_Time_of_Study_Entry"]
+factors$gender = data$sampleData[rownames(factors),"Gender"]
+factors$serology = data$sampleData[rownames(factors),"T1_lyme_disease_result"]
+factors = cbind(factors,data$sampleData[rownames(factors),c("Systolic","Diastolic","Pulse","BMI")])
+```
+
+### Patients vs. Controls Differential Expression
+
+```{r limmaPatientsVsControls}
+#T1 naive v T1 AB v control limma~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+levels = factor(paste(factors$Time,factors$Type,factors$naive,sep="."))
+mm = model.matrix(~0+levels+factors$age+factors$gender+factors$serology)
+colnames(mm) = gsub("levels|factors\\$","",colnames(mm))
+groups = colnames(mm)
+
+contrasts = c()
+for(i in 1:ncol(mm)){
+  for(j in 1:ncol(mm)){
+    if(i!=j)
+      contrasts = c(contrasts,paste0(colnames(mm)[i],"-",colnames(mm)[j]))
+  }
+}
+
+fit = lmFit(t(data$assayData),mm)
+conMat = makeContrasts(contrasts = contrasts,levels = groups)
+fit2 = contrasts.fit(fit,conMat)
+fit2 = eBayes(fit2)
+
+n_ab_controlList = list()
+for(i in 1:length(contrasts)){
+  n_ab_controlList[[i]] = limma::topTable(fit2,coef = contrasts[i],adjust.method = "BH",number = Inf)
+}
+names(n_ab_controlList) = contrasts
+n_ab_controlList = n_ab_controlList[!grepl("serology|age|gender",names(n_ab_controlList))]
+rm("conMat","contrasts",
+   "fit","fit2","i","j","levels",
+   "mm")
+```
+
+```{r naiveTreatedControls, fig.height=3, fig.width=7.5, fig.cap = "Volcano plots showing limma differential expression results of AB naive and treated patients and controls at T1. The eight most significant proteins are labeled. Blue dots indicate proteins significant at p<0.05."}
+
+# Plot naive v AB v control volcano plots~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+limmaResult = n_ab_controlList[c("T1.p.TRUE-TC.c.TRUE", "T1.p.FALSE-TC.c.TRUE", "T1.p.TRUE-T1.p.FALSE")]
+names(limmaResult) = c("T1 - Controls vs. \nAB Naive", "T1 - Controls vs. \nAB Treated", "T1 - AB Treated vs. \nAB Naive")
+for(i in 1:length(limmaResult)){
+  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
+  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
+  limmaResult[[i]]$Protein = gsub("\\.", "", rownames(limmaResult[[i]]))
+  limmaResult[[i]]$rank = rank(limmaResult[[i]]$adj.P.Val, "min")
+}
+limmaResult = do.call(rbind, limmaResult)
+
+
+n_highlight = 5
+both = ggplot(limmaResult, aes(x = logFC, y = -log10(adj.P.Val), color = adj.P.Val < .05)) + 
+  geom_point(size = 5) + 
+  geom_text_repel(aes(x = logFC, y = -log10(adj.P.Val), label = ifelse(rank <= n_highlight, Protein, "")), color = 'black', size = 8) +
+  facet_grid(cols = vars(ID)) + 
+  guides(color = guide_legend(title="p < 0.05")) + 
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p value") + 
+  # ggtitle("Differential Expression at T1") +
+  theme_minimal(base_size = 40)
+# both
+# 
+# png("./figures_final/Olink/Volcano Controls AB Naive and Treated.png",width=550*3,height=250*3)
+# both
+# dev.off()
+# 
+# # Number of DEPs at diagnosis
+# sum(limmaResult$adj.P.Val[limmaResult$ID=="T1 - Controls vs. \nAB Naive"]>0.05)
+# 
+# rm(both)
+
+both
+```
+
+```{r naiveVsControls, fig.height=3, fig.width=7.5,fig.cap = "Volcano plots showing limma differential expression results of AB naive patients and controls at T1-4. The eight most significant proteins are labeled. Blue dots indicate proteins significant at p<0.05."}
+comps = c("T1.p.TRUE-TC.c.TRUE","T2.p.TRUE-TC.c.TRUE","T3.p.TRUE-TC.c.TRUE","T4.p.TRUE-TC.c.TRUE")
+limmaResult = n_ab_controlList[comps]
+names(limmaResult) = c("T1 - Controls \nvs. Patients",
+                       "T2 - Controls \nvs. Patients",
+                       "T3 - Controls \nvs. Patients",
+                       "T4 - Controls \nvs. Patients")
+for(i in 1:length(limmaResult)){
+  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
+  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
+  limmaResult[[i]]$Protein = gsub("\\.", "", rownames(limmaResult[[i]]))
+  limmaResult[[i]]$rank = rank(limmaResult[[i]]$adj.P.Val, "min")
+}
+limmaResult = limmaResult[c("T1 - Controls \nvs. Patients",
+                            "T2 - Controls \nvs. Patients",
+                            "T3 - Controls \nvs. Patients",
+                            "T4 - Controls \nvs. Patients")]
+groupedDE = limmaResult
+limmaResult = do.call(rbind, limmaResult)
+n_highlight = 5
+naive = ggplot(limmaResult, aes(x = logFC, y = -log10(adj.P.Val), color = adj.P.Val < .05)) + 
+  geom_point(size = 5) + 
+  geom_text_repel(aes(x = logFC, y = -log10(adj.P.Val), label = ifelse(rank <= n_highlight, Protein, "")), color = 'black', size = 8) +
+  facet_grid(cols = vars(ID)) + 
+  guides(color = guide_legend(title="p < 0.05")) + 
+  xlab("log2 fold change") + ylab("-log10 adjusted p value") + #ggtitle("Antibiotic Naive Patients vs. Controls") +
+  theme_minimal(base_size = 40)
+# naive
+# 
+# png("./figures_final/Olink/Volcano Controls vs AB Naive.png",width=550*3,height=250*3)
+# naive
+# dev.off()
+# rm(naive,n_highlight)
+
+naive
+```
+
+### Spaghetti plots
+
+```{r spaghettiPlots, fig.height=2, fig.width=3, fig.cap = "Spaghetti plot showing patient trajectories for the protein LAMP3."}
+dat = data$data[data$data$Condition=="Patient",]
+p = ggplot(dat, aes(x = days_post_ab, y = `LAMP3`, group = Subject_ID, color = gg_color_hue(1))) + 
+  geom_line(show.legend = FALSE)+
+  xlab("Days Post Antibiotics")+
+  xlim(c(0,400))+
+  theme(text = element_text(family = 'sans')) + 
+  theme_minimal(base_size = 26)
+p
+```
+
+### Pair-wise comparisons
+
+```{r pairWiseLimma}
+vars = ls()
+#Differential Expression ~~~~~~~~~~~~~~~~~~~~~~~~
+times = c("T1","T2","T3","T4")
+timeComps = list()
+for(i in 1:length(times)){
+  for(j in 1:length(times)){
+    if(i!=j&i<j){
+      timeComps[[length(timeComps)+1]] = c(times[i],times[j])
+      names(timeComps)[length(timeComps)] = paste0(times[i],"-",times[j])
+    }
+  }
+}
+
+proteins = colnames(data$assayData)
+
+pFrame = data.frame(proteins = proteins)
+adj_pFrame = data.frame(proteins = proteins)
+logFCFrame = data.frame(proteins = proteins)
+
+rownames(pFrame) = proteins
+rownames(adj_pFrame) = proteins
+rownames(logFCFrame) = proteins
+
+de_list = list()
+fit_list = list()
+
+for(i in 1:length(timeComps)){
+  comparison = timeComps[[i]]
+  naive = c(TRUE)
+  type = c("p")
+  
+  factorSub = factors[factors$Type%in%type&factors$Time%in%comparison&factors$naive%in%naive,]
+  factorSub = lapply(factorSub,FUN = factor)
+  ids = paste0(factorSub$Patient," ",factorSub$Time)
+  
+  patient = factorSub$Patient
+  time = factorSub$Time
+  naive = factorSub$naive
+  type = factorSub$Type
+  daysPostAB = factorSub$DaysPostAB
+  age = data$sampleData[ids,"Age_at_Time_of_Study_Entry"]
+  sero = data$sampleData[ids,"T1_lyme_disease_result"]
+  gender = data$sampleData[ids,"Gender"]
+  
+  # if(!"T2"%in%comparison){
+  #   systolic = data$sampleData[ids,"Sytolic"]
+  #   diastolic = data$sampleData[ids,"Diastolic"]
+  #   pulse = data$sampleData[ids,"Pulse"]
+  #   bmi = data$sampleData[ids,"BMI"]
+  #   
+  #   mm = model.matrix(~0+patient+time+age+sero+gender+systolic+diastolic+pulse+bmi)
+  # }else{
+  mm = model.matrix(~0+patient+time+age+sero+gender)
+  # }
+  
+  fit <- lmFit(t(data$assayData[paste0(as.character(patient)," ",as.character(time)),]),mm)
+  fit <- eBayes(fit)
+  
+  fit_list[[i]] = fit
+  
+  top = limma::topTable(fit, coef=paste0("time",comparison[2]),number = Inf)
+  
+  de_list[[i]] = top
+  
+  top = top[proteins,]
+  
+  pFrame[,names(timeComps)[i]] = top$P.Val
+  adj_pFrame[,names(timeComps)[i]] = top$adj.P.Val
+  logFCFrame[,names(timeComps)[i]] = top$logFC
+}
+names(de_list) = unlist(lapply(timeComps, paste, collapse = "-"))
+names(fit_list) = unlist(lapply(timeComps, paste, collapse = "-"))
+
+#Clean up differential expression results ~~~~~~~
+
+logFCFrame = logFCFrame[,-1]
+pFrame = pFrame[,-1]
+adj_pFrame = adj_pFrame[,-1]
+pairwise = list(logFC = logFCFrame, p = pFrame, p.adj = adj_pFrame)
+logFCFrame = logFCFrame[!apply(adj_pFrame,MARGIN = 1,function(x) sum(x<.05) == 0),]
+logFCFrame = logFCFrame[order(rowSums(logFCFrame,na.rm = T),decreasing = T),]
+adj_pFrame = adj_pFrame[rownames(logFCFrame), colnames(logFCFrame)]
+rownames(logFCFrame) = gsub("\\.", " ", rownames(logFCFrame))
+rownames(adj_pFrame) = gsub("\\.", " ", rownames(adj_pFrame))
+panel = data$featureData$panel[match(rownames(logFCFrame),data$featureData$protein)]
+rownames(logFCFrame) = make.unique(fixNames(rownames(logFCFrame)))
+rownames(adj_pFrame) = make.unique(fixNames(rownames(adj_pFrame)))
+```
+
+### Pairwise DE Heatmap
+
+```{r plotPairwiseDE, fig.height=7.5, fig.width=3, fig.cap = "Heatmap showing pairwise differential expression results of protein values in antibiotic naive patients at the indicated time points. Color indicates logFC, and grey cells indicate no significance. Differential expression was calculated using the R package limma."}
+# Plot Ven Diagram ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# upset(data = fromList(apply(pairwise$p,2,function(x)rownames(pairwise$p)[x<=0.05])), order.by = "freq")
+
+# Plot Heatmap ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+col_fun = circlize::colorRamp2(c(-1.5, 0, 1.5), c("blue", "white","red"))
+
+cell_fun = function(j, i, x, y, width, height, fill) {
+  txt = returnSigStars(adj_pFrame[i, j])
+  if(txt=="ns")txt = ""
+  grid.text(txt, x, y, gp = gpar(fontsize = 32),vjust=.8)
+}
+hc1 = hclust(dist(-1*logFCFrame),method = "ward.D2")
+infimm_clust = paste0("c",cutree(hc1,2))
+infimm_clust[infimm_clust=="c1"] = 'fast'
+infimm_clust[infimm_clust=="c2"] = 'slow'
+names(infimm_clust) = rownames(logFCFrame)
+pairwise$cluster = rep("none",nrow(pairwise$logFC))
+pairwise$cluster[names(infimm_clust)] = infimm_clust
+rowanno = rowAnnotation(cluster = infimm_clust,
+                        col=list(cluster=c(fast="#F8766D",slow="#00BFC4")),
+                        annotation_name_gp = gpar(fontsize=32),
+                        # width = unit(5000,"cm"),
+                        simple_anno_size = unit(1,"cm"),
+                        annotation_legend_param = list(legend_width=unit(10,"cm"),
+                                                       labels_gp=gpar(fontsize=32),
+                                                       grid_height = unit(15, "mm"),
+                                                       grid_width = unit(15, "mm"),
+                                                       title_gap = unit(30, "mm"),
+                                                       title_position = "topcenter",
+                                                       title_gp = gpar(fontsize = 32, fontface = "bold")))
+hm = Heatmap(matrix = -1*logFCFrame,
+             cluster_columns = F,
+             cell_fun = cell_fun,
+             col = col_fun,
+             cluster_rows = hc1,
+             left_annotation = rowanno,
+             row_names_gp = gpar(fontsize=24),
+             column_names_gp = gpar(fontsize=32),
+             heatmap_legend_param = list(title="logFC",legend_height=unit(10,"cm"),
+                                         title_gap = unit(300, "mm"),
+                                         legend_height=unit(5,"mm"),
+                                         legend_width=unit(80,"mm"),
+                                         legend_direction = "horizontal",
+                                         labels_gp=gpar(fontsize=32),
+                                         grid_height = unit(5, "mm"),
+                                         grid_width = unit(80, "mm"),
+                                         title_position = "topcenter",
+                                         title_gp = gpar(fontsize = 32, fontface = "bold")),
+             name = "logFC")
+hm = ComplexHeatmap::draw(hm,padding=unit(c(1, 1, 1, 1.5), "cm"),heatmap_legend_side="bottom")
+# hm
+# png("./figures_final/Olink/Pairwise DE Heatmap.png",width = 250*3,height=800*3)
+# hm
+# dev.off()
+# 
+# rm("hm","hc1","infimm_clust","rowanno","mm")
+```
+
+### Representative line plots
+
+```{r, fig.width = 4,fig.height = 5}
+topSlow = names(pairwise$cluster)[pairwise$cluster=="slow"][order(pairwise$logFC[names(pairwise$cluster)[pairwise$cluster=="slow"],"T1-T4"])][c(2,3,5)]
+topFast = names(pairwise$cluster)[pairwise$cluster=="fast"][order(pairwise$logFC[names(pairwise$cluster)[pairwise$cluster=="fast"],"T1-T2"])][c(1,4,5)]
+
+dat = data$assayData[data$sampleData$Condition=="Patient"&data$sampleData$days_of_prior_antibiotics==0,c(topFast,topSlow)]
+
+dat = cbind(data$sampleData[rownames(dat),c("Subject_ID","days_post_ab","time")],dat)
+dat_long = pivot_longer(dat,cols = 4:ncol(dat),names_to = 'protein',values_to = 'value')
+dat_long$protein = fixNames(dat_long$protein)
+dat_long$protein = factor(dat_long$protein,levels = c(topFast,topSlow))
+dat_long$cluster = rep("no clust",nrow(dat_long))
+dat_long$cluster[dat_long$protein%in%names(pairwise$cluster)[pairwise$cluster=="fast"]] = "Fast Resolving"
+dat_long$cluster[dat_long$protein%in%names(pairwise$cluster)[pairwise$cluster=="slow"]] = "Slow Resolving"
+dat_long$SubProt = paste0(dat_long$Subject_ID," - ",dat_long$protein)
+# dat_long$days_post_ab
+dat_long$cluster = factor(dat_long$cluster,levels = c("Fast Resolving","Slow Resolving"))
+
+p = ggplot(dat_long, aes(x=days_post_ab,y = value,fill = cluster))+
+  # geom_boxplot()+
+  geom_smooth(size=2)+
+  # scale_fill_manual(values=gg_color_hue(2)[2:1])+
+  facet_wrap(~protein,scales = 'free_y')+
+  xlim(0,400)+
+  theme_minimal(base_size = 50)+
+  xlab('Days Post Antibiotics')
+p
+
+# png("./figures_final/Olink/Slow Fast Line Plots.png",width = 750*3,height = 450*3)
+# p
+# dev.off()
+# 
+# rm("p","dat_long","dat")
+```
+

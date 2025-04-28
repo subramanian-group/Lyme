@@ -1,0 +1,156 @@
+---
+title: "Untitled"
+format: html
+---
+
+```{r}
+pacman::p_load(flowCore, SingleCellExperiment,flowStats,
+               dplyr,tidyr,tibble,ggplot2,ggpubr,rasterpdf)
+#functions
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+
+rep = list.files("data/Flow/representative clustering/",full.names = T)
+for(i in 1:length(rep)){
+  load(rep[i])
+}
+rep = list(mono=mono,dcnk=dcnk,bcell=bcell,tcell=tcell)
+rm(mono,dcnk,bcell,tcell)
+
+
+plot_flow = function(sce,x,y,ids,cluster_col='clust',assay = 'counts',title = 'Population'){
+  keep = sce$sample_id%in%ids
+  id = sce$sample_id[keep]
+  cluster = sce@colData[keep,cluster_col]
+  d = data.frame(t(assay(sce))[keep,c(x,y)],
+                 population=cluster,
+                 id=id)
+  ggplot(d,aes_string(x=x,y=y,color="population"))+
+    geom_point(cex=.2,alpha=.25)+
+    guides(colour = guide_legend(override.aes = list(size=4,alpha=1),
+                                 nrow = 1,
+                                 title = title))+
+    # facet_wrap(vars(id),nrow=1)+
+    # stat_density_2d(aes(fill = ..level..), geom = "polygon",contour_var = 'ndensity') +
+    # scale_fill_viridis_c(alpha = .25)+
+    # geom_density_2d_filled(contour_var = "ndensity",adjust=2,alpha=.5)+
+    # scale_fill_distiller(palette = "Blues", direction = 1) +
+    theme_minimal(base_size = 10)+
+    theme(legend.position="top")
+}
+
+
+sam = as.character(unique(rep$mono$sample_id))[1]
+
+mono = list()
+title = ''
+mono[[1]] = plot_flow(sce = rep$mono,
+                      x = 'CD16',
+                      y = 'CD14',
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+mono[[2]] = plot_flow(sce = rep$mono,
+                      x = 'CD14',
+                      y = 'HLADR',
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+mono[[3]] = plot_flow(sce = rep$mono,
+                      x = 'CD16',
+                      y = 'HLADR',
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+mono = ggarrange(plotlist = mono,nrow = 1,common.legend = T)
+
+dcnk = list()
+title = ""
+dcnk[[1]] = plot_flow(sce = rep$dcnk,
+                      x="CD56",
+                      y="HLADR",
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+dcnk[[2]] = plot_flow(sce = rep$dcnk,
+                      x="CD56",
+                      y="CD123",
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+dcnk[[3]] = plot_flow(sce = rep$dcnk,
+                      x="CD56",
+                      y="CD11c",
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+dcnk[[4]] = plot_flow(sce = rep$dcnk,
+                      x="CD16",
+                      y="CD56",
+                      ids = sam,
+                      cluster_col = 'clust',
+                      title = title)
+dcnk = ggarrange(plotlist = dcnk,nrow = 1,common.legend = T)
+
+
+bcell = list()
+title = ''
+bcell[[1]] = plot_flow(sce = rep$bcell,
+                       x="IgD",
+                       y="CD27",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+bcell[[2]] = plot_flow(sce = rep$bcell,
+                       x="CD38",
+                       y="CD24",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+bcell[[3]] = plot_flow(sce = rep$bcell,
+                       x="CD38",
+                       y="CD138",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+bcell[[4]] = plot_flow(sce = rep$bcell,
+                       x="IgM",
+                       y="IgD",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+bcell = ggarrange(plotlist = bcell,nrow = 1,common.legend = T)
+
+tcell = list()
+title = ''
+rep$tcell$clust = rep$tcell@metadata$clusters$main
+tcell[[1]] = plot_flow(sce = rep$tcell,
+                       x="CD4",
+                       y="CD8",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+# rep$tcell$clust = rep$tcell@metadata$clusters$mem
+rep$tcell$clust = c("Cent. Mem","Eff. Mem.", "Naive", "Eff.")[match(rep$tcell@metadata$clusters$mem,unique(rep$tcell@metadata$clusters$mem))]
+tcell[[2]] = plot_flow(sce = rep$tcell,
+                       x="CD45RO",
+                       y="CCR7",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+rep$tcell$clust = rep$tcell@metadata$clusters$ydTCR
+tcell[[3]] = plot_flow(sce = rep$tcell,
+                       x="CD4",
+                       y="ydTCR",
+                       ids = sam,
+                       cluster_col = 'clust',
+                       title = title)
+tcell = ggarrange(plotlist = tcell,nrow = 1,common.legend = F,legend = 'top')
+p = ggarrange(mono,dcnk,bcell,tcell,ncol=1)
+# p
+
+```
+

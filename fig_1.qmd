@@ -1,0 +1,431 @@
+---
+title: "Figure 1"
+editor_options: 
+  chunk_output_type: console
+format:
+  html:
+    warning: false     
+    message: false
+    cache: true
+    error: true
+    echo: true        
+    code-fold: true
+    code-tools: true
+---
+
+```{r libraries}
+#| echo: false
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  # Data wrangling and visualization
+  tidyverse, # Core data wrangling and plotting
+  ggrepel, # Repel overlapping text labels in ggplot2
+  ggstance, # Horizontal geoms for ggplot2
+  gghighlight, # Highlight ggplot2 layers based on conditions
+  ggnewscale, # Multiple color/size scales in ggplot2
+  geomTextpath,
+  patchwork, # Combine multiple ggplots
+  cowplot, # Additional plot layout tools
+  camcorder, # Review plot proportionality before saving
+  RColorBrewer, # Color palettes for plots
+  Hmisc, # Various utilities (summary stats, tables, plots)
+  ggpubr, # Publication-ready ggplot2 enhancements
+  ggplotify, # Convert plots into ggplot objects
+  conflicted, # Manage function conflicts
+
+  # Bulk RNA-seq and statistical modeling
+  # limma, # Linear models for microarray and RNA-seq
+  # edgeR, # Differential expression for count data
+  # DESeq2, # Differential expression for RNA-seq
+
+  # Enrichment analysis and gene sets
+  # clusterProfiler, # GO/KEGG enrichment analysis
+  # enrichR, # Enrichment analysis via web APIs
+  # msigdbr, # Molecular Signatures Database (MSigDB) in R
+  # DOSE, # Disease Ontology Semantic and Enrichment analysis
+  # org.Hs.eg.db, # Human gene annotation database
+
+  # Heatmaps and Venn diagrams
+  ComplexHeatmap, # Advanced customizable heatmaps
+  pheatmap, # Simple heatmaps
+  VennDiagram, # Venn diagram drawing
+  UpSetR, # Set visualization (UpSet plots)
+  factoextra, # Visualization for multivariate data (PCA, clustering)
+
+  # Network and graph analysis
+  # ggraph, # Graph/network visualization
+  # tidygraph, # Tidy interface for graph data
+  # igraph, # Core graph algorithms
+
+  # # Machine learning
+  # caret,             # Machine learning training and tuning
+  # glmnet,            # Elastic-net regression (lasso + ridge)
+  # glmmLasso,
+  # e1071,             # SVM and other ML algorithms
+  # mice,              # Multivariate imputation of missing values
+  # matrixStats,       # Fast row/column computations
+  # progress,          # Progress bars for loops
+
+  # # Single-cell RNA-seq analysis
+  # DropletUtils,     # Handling droplet scRNA-seq outputs
+  # Seurat,           # Single-cell RNA-seq toolkit
+  # scater,           # SingleCellExperiment QC and plotting
+  # scuttle,          # Utilities for SingleCellExperiment objects
+  # SingleR,          # Automated cell type labeling
+  # celldex,          # Reference datasets for SingleR
+  # cellassign        # Probabilistic cell assignment (needs tensorflow)
+  # tensorflow,       # TensorFlow backend for deep learning (needed by cellassign)
+
+  # Table formatting and reports
+  # kableExtra,        # Enhanced tables in HTML and LaTeX
+  # officer,           # Create/edit Word and PowerPoint documents
+  # openxlsx,          # Read/write Excel files
+  here,
+  datapasta # Copy-paste data into Excel
+)
+```
+
+```{r setup}
+#| echo: false
+
+# Resolve conflicts
+conflicts_prefer(dplyr::select,
+                 dplyr::filter,
+                 dplyr::slice,
+                 dplyr::count,
+                 dplyr::rename,
+                 dplyr::desc)
+
+# Set a global theme and base size
+theme_set(
+  theme_minimal()
+)
+
+update_geom_defaults("text", list(size = 8, family = "Arial")
+
+```
+
+```{r 1b}
+#| fig-cap: "Figure 1b"
+
+Banked_Sample_Data <- read_csv("data/Banked_Sample_Data.csv", skip = 1)
+
+sampleData <- read_csv("data/sampleData.csv") |>
+  mutate(Subject_ID = Subject_ID |>
+    as.character())
+
+banked <- Banked_Sample_Data |>
+  dplyr::rename(
+    `Ethnic origin` = `Ethnic Origin`,
+    Subject_ID = `NYMC ID`,
+    Condition = `Lyme Borreliosis?`,
+    `Age (years)` = `Age at Time of Consent`
+  ) |>
+  dplyr::select(Subject_ID, Condition, `Ethnic origin`, Gender, `Age (years)`) |>
+  mutate(
+    `Ethnic origin` = case_when(`Ethnic origin` == "W" ~ "White",
+      `Ethnic origin` == "H" ~ "Hisp",
+      `Ethnic origin` == "A" ~ "Asian",
+      .default = "Unk"
+    ),
+    Condition = case_when(
+      Condition == "Lyme" ~ "Patient",
+      .default = "Control"
+    ),
+    Gender = case_when(
+      Gender == "Male" ~ "M",
+      Gender == "Female" ~ "F"
+    )
+  ) |>
+  mutate(`Ethnic origin` = factor(
+    `Ethnic origin`,
+    levels = c("White", "Asian", "Hisp", "Black", "Multi", "Unk")
+  ))
+
+prospective <- sampleData |>
+  filter(time == "T1") |>
+  dplyr::rename(
+    `Ethnic origin` = `Ethnic_Origin`,
+    `Age (years)` = Age_at_Time_of_Study_Entry
+  ) |>
+  dplyr::select(Subject_ID, Condition, `Ethnic origin`, Gender, `Age (years)`) |>
+  mutate(
+    `Ethnic origin` = case_when(`Ethnic origin` == "W" ~ "White",
+      `Ethnic origin` == "H" ~ "Hisp",
+      `Ethnic origin` == "A" ~ "Asian",
+      `Ethnic origin` == "B" ~ "Black",
+      .default = "Multi"
+    ),
+    Gender = case_when(
+      Gender == "Male" ~ "M",
+      Gender == "Female" ~ "F"
+    )
+  ) |>
+  mutate(`Ethnic origin` = factor(
+    `Ethnic origin`,
+    levels = c("White", "Asian", "Hisp", "Black", "Multi", "Unk")
+  ))
+
+combined <- bind_rows(banked, prospective, .id = "Cohort") |>
+  mutate(Cohort = case_when(
+    Cohort == "1" ~ "Banked cohort",
+    .default = "Prospective cohort"
+  ))
+
+combined_age <- combined |>
+  mutate(age_interval = cut(`Age (years)`,
+    breaks = c(20, 30, 40, 50, 60, 70, 80),
+    labels = c("21-30", "31-40", "41-50", "51-60", "61-70", "71-80")
+  )) |>
+  mutate(age_interval = str_replace_na(age_interval, "18-20") |>
+    as.factor() |>
+    as.numeric()) |>
+  filter(Cohort == "Prospective cohort") |>
+  ggplot(aes(age_interval)) +
+  geom_bar(fill = "#E41A1C") +
+  # geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.2) +
+  scale_x_continuous(
+    sec.axis = dup_axis(name = "Age (years)"),
+    labels = c("18-20", "21-30", "31-40", "41-50", "51-60", "61-70", "71-80"),
+    breaks = 1:7
+  ) +
+  theme(
+    text = element_text(
+      size = 10,
+      family = "Arial"
+    ),
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    axis.title.x.bottom = element_blank(),
+    axis.text.x.top = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    strip.text = element_blank()
+  ) +
+  # facet_wrap(vars(Cohort), nrow = 2) +
+  ylab("Count")
+
+combined_ethnicity <- combined |>
+  filter(Cohort == "Prospective cohort") |>
+  ggplot(aes(`Ethnic origin` |> as.numeric())) +
+  geom_bar(fill = "#E41A1C") +
+  # geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.2) +
+  scale_x_continuous(
+    sec.axis = dup_axis(name = "Ethnic origin"),
+    labels = c("White", "Asian", "Hisp", "Black", "Multi", "Unk"),
+    breaks = 1:6
+  ) +
+  theme(
+    text = element_text(
+      size = 10,
+      family = "Arial"
+    ),
+    # axis.text.y = element_blank(),
+    # axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    axis.title.x.bottom = element_blank(),
+    axis.text.x.top = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    strip.text = element_blank()
+  ) +
+  # facet_wrap(vars(Cohort), nrow = 2) +
+  ylab("Count")
+
+combined_gender <- combined |>
+  filter(Cohort == "Prospective cohort") |>
+  ggplot(aes(Gender |> as.factor() |> as.numeric())) +
+  geom_bar(fill = "#E41A1C") +
+  # geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.2) +
+  scale_x_continuous(
+    sec.axis = dup_axis(name = "Gender"),
+    labels = c("F", "M"),
+    breaks = 1:2
+  ) +
+  theme(
+    text = element_text(
+      size = 10,
+      family = "Arial"
+    ),
+    axis.title.y = element_blank(),
+    axis.title.x.bottom = element_blank(),
+    axis.text.x.top = element_blank(),
+    axis.ticks.x.top = element_blank()
+  ) +
+  # facet_wrap(vars(Cohort), nrow = 2, strip.position = "right")
+  ylab("Count")
+
+combined_demographics <- combined_age + combined_ethnicity + (combined_gender) +
+  plot_layout(widths = c(3.5, 3.5, 1))
+
+combined_demographics
+```
+
+```{r 1c}
+#| fig-cap: "Figure 1c"
+#| fig-width: 11.11 # width = 400*2/72
+#| fig-height: 6.25 # height = 250*2/72
+
+load("data/OlinkPreprocessed.RData")
+
+d <- data$sampleData
+c6 <- rep(NA, nrow(d))
+c6[d$time == "T1"] <- d$T1_lyme_disease_result[d$time == "T1"]
+c6[d$time == "T2"] <- d$T2_lyme_disease_result[d$time == "T2"]
+c6[d$time == "T3"] <- d$T3_lyme_disease_result[d$time == "T3"]
+c6[d$time == "T4"] <- d$T4_lyme_disease_result[d$time == "T4"]
+d$C6 <- c6
+keep <- d$Condition == "Patient" &
+  d$days_of_prior_antibiotics == 0 &
+  !is.na(d$C6) & !d$C6 %in% c("ND", "") &
+  d$time %in% c("T1", "T2", "T4")
+d <- d[keep, ]
+d <- d %>%
+  count(time, C6) %>%
+  group_by(time) %>%
+  mutate(percent = n / sum(n) * 100)
+p <- ggplot(d, aes(x = time, y = percent, fill = C6)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(stat = "identity", aes(label = n), position = position_stack(vjust = 0.5), size = 12) +
+  theme_minimal(base_size = 45) +
+  xlab("Time") +
+  ylab("Percent") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1))
+
+# png("figures_final/Demographics/C6 results.png",width = 400*2,height = 250*2)
+# p
+# dev.off()
+#
+# rm(c6,d)
+
+p
+```
+
+```{r 1d}
+#| fig-cap: "Figure 1d"
+#| fig-width: 25 # width = 600*3/72
+#| fig-height: 8 # height = 225*2/72
+
+load("data/OlinkPreprocessed.RData")
+
+sams <- data$sampleData$time %in% c("T1", "T3", "T4") & data$sampleData$days_of_prior_antibiotics == 0 & data$sampleData$Condition == "Patient"
+direct <- data$directSymptoms[sams, ]
+time <- data$sampleData[sams, "time"]
+d <- direct
+colnames(d)[grep("Difficult", colnames(d))] <- "Difficulty Concentrating"
+colnames(d) <- gsub("\\.", " ", colnames(d))
+d2 <- d
+d2 <- d2 / 7.6
+d2 <- d2[order(time), ]
+time <- sort(time)
+rn <- rownames(d2)
+d2 <- split(d2, time)
+d2 <- lapply(d2, function(x) {
+  x$`Avg. Symptom Score` <- rowMeans(x)
+  x
+})
+d2 <- data.frame(do.call(rbind, d2))
+rownames(d2) <- rn
+d3 <- d2
+d3[is.na(d3)] <- 0
+hc1 <- rownames(d3)[time == "T1"][hclust(dist(d3[time == "T1", ]))$order]
+# hc3 = rownames(d3)[time=="T3"][hclust(dist(d3[time=="T3",]))$order]
+# hc4 = rownames(d3)[time=="T4"][hclust(dist(d3[time=="T4",]))$order]
+hc3 <- na.omit(rownames(d3)[time == "T3"][match(gsub(" T.*", "", hc1), gsub(" T.*", "", rownames(d3)[time == "T3"]))])
+hc4 <- na.omit(rownames(d3)[time == "T4"][match(gsub(" T.*", "", hc1), gsub(" T.*", "", rownames(d3)[time == "T4"]))])
+hc1 <- c(hc1, hc3, hc4)
+# hc2 = colnames(d3)[hclust(dist(t(d2)))$order]
+hc2 <- names(sort(colSums(d3), decreasing = F))
+d2 <- data.frame(cbind(id = rownames(d2), time = c("Diagnosis", "6 Months", "1 Year")[match(time, unique(time))], d2))
+d2 <- pivot_longer(d2, cols = 3:ncol(d2), values_to = "Symptom Score")
+d2$name <- gsub("\\.([A-Z])", " \\1", d2$name)
+d2$name <- gsub("\\.([a-z])", " \\1", d2$name)
+d2$id <- factor(d2$id, levels = hc1, ordered = T)
+levs <- gsub("\\.([A-Z])", " \\1", hc2)
+levs <- gsub("\\.([a-z])", " \\1", levs)
+d2$name <- factor(d2$name, levels = levs, ordered = T)
+d2$time <- factor(d2$time, levels = c("Diagnosis", "6 Months", "1 Year"), ordered = T)
+d2 <- d2[order(d2$id), ]
+p <- ggplot(d2[d2$name != "Avg. Symptom Score", ], aes(x = id, y = name, size = `Symptom Score`, col = `Symptom Score`)) +
+  geom_point(alpha = 0.75) +
+  scale_color_gradient(low = "white", high = "red", limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  guides(color = guide_legend(), size = guide_legend()) +
+  scale_size_continuous(range = c(1, 10), limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  theme_minimal(base_size = 38) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  facet_wrap(vars(time), nrow = 1, drop = TRUE, scales = "free_x")
+# png("figures_final/Demographics/Symptom time bubble plot skinny.png",width = 600*3,height = 225*2)
+# print(p)
+# dev.off()
+
+p
+```
+
+```{r 1e}
+#| fig-cap: "Figure 1e"
+#| fig-width: 9.375  # width = 225*3/72
+#| fig-height: 11.11 # height = 400*2/72
+
+d2$id2 <- gsub(" T.*", "", d2$id)
+p2 <- ggplot(d2[d2$name == "Avg. Symptom Score", ], aes(x = time, y = `Symptom Score`)) +
+  geom_boxplot(show.legend = F, outlier.shape = NA, size = 3) +
+  geom_point(alpha = 1, size = 6) +
+  geom_line(aes(group = id2), show.legend = F, alpha = .5, size = 3, color = "grey30") +
+  ylab("Avg. Symptom Score") +
+  theme_minimal(base_size = 48) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+# png("figures_final/Demographics/Avg sym score boxplot.png",width = 225*3,height = 400*2)
+# print(p2)
+# dev.off()
+#
+rm("hc1", "hc2", "d2")
+
+p2
+```
+
+```{r 1f}
+#| fig-cap: "Figure 1f"
+#| fig-width: 25   # width = 600*3/72
+#| fig-height: 25  # height = 600*3/72
+
+pacman::p_load(corrplot)
+s <- data$sampleData
+keep <- s$days_of_prior_antibiotics == 0 & s$Condition == "Patient" & s$time == "T1"
+s <- s[keep, ]
+s <- cbind(s, data$emData[keep, ])
+d <- data$directSymptoms[keep, ]
+s <- s[, c("Age_at_Time_of_Study_Entry", "Diastolic", "Pulse", "BMI", "largest_EM_Dimension", "Number_of_EM_at_Baseline")]
+# cor(d,s,use='na.or.complete')
+c <- Hmisc::rcorr(x = as.matrix(d), y = as.matrix(s), type = "spearman")
+
+r <- c$r
+p <- c$P
+names <- colnames(r)
+names <- levs <- gsub("\\.([A-Z])", " \\1", names)
+names <- gsub("\\.([a-z])", " \\1", names)
+names <- gsub("_", " ", names)
+names <- gsub("\\. ", "/", names)
+names[grep("^larg", names)] <- "Largest EM Dimension"
+names[grep("^Age", names)] <- "Age"
+names[grep("^Diffi", names)] <- "Concentration/Memory Problems"
+colnames(r) <- names
+rownames(r) <- names
+colnames(p) <- names
+rownames(p) <- names
+col <- colorRampPalette(c("blue", "white", "red"))(20)
+# png("figures_final/Demographics/Symptom Correlations.png",width = 600*3,height = 600*3)
+# corrplot(r,type="upper", order="hclust", col=col,tl.cex = 3,cl.cex = 3,tl.col = 'black',diag = F,
+#          p.mat = c$p, sig.level = 0.05, insig = "blank")
+# dev.off()
+
+corrplot(r,
+  type = "upper", order = "hclust", col = col, tl.cex = 3, cl.cex = 3, tl.col = "black", diag = F,
+  p.mat = c$p, sig.level = 0.05, insig = "blank"
+)
+```

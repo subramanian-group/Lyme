@@ -1,0 +1,357 @@
+---
+title: "Untitled"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  library(diffcyt)
+)
+```
+
+```{r load_functions, results='hide'}
+
+returnSigStars = function(x){
+  x2 = x
+  x2[is.numeric(x) & x > 0.05] = "ns"
+  x2[is.numeric(x) & x < 0.05] = "*"
+  x2[is.numeric(x) & x < 0.01] = "**"
+  x2[is.numeric(x) & x < 0.001] = "***"
+  x2[is.numeric(x) & x < 0.0001] = "****"
+  x2
+}
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+fixNames = function(x){
+  x = gsub("\\..*","",x)
+  x = gsub("-","",x)
+  x = gsub("/.*","",x)
+  x = gsub("\\(.*","",x)
+  x = toupper(x)
+  alias = alias2SymbolTable(x)
+  x[!is.na(alias)] = alias[!is.na(alias)]
+  x
+}
+
+testDA_edgeR <- function(counts,cluster_id, design, contrast, 
+                         trend_method = "none", 
+                         min_cells = 3, min_samples = NULL, 
+                         normalize = T, norm_factors = "TMM") {
+  
+  if (is.null(min_samples)) {
+    min_samples <- ncol(counts) / 2
+  }
+  
+  if(missing(cluster_id)){
+    cluster_id = rownames(counts)
+  }
+  
+  cluster_id_all = cluster_id
+  
+  # filtering: keep clusters with at least 'min_cells' cells in at least 'min_samples' samples
+  tf <- counts >= min_cells
+  ix_keep <- apply(tf, 1, function(r) sum(r) >= min_samples)
+  
+  counts <- counts[ix_keep, , drop = FALSE]
+  cluster_id <- cluster_id[ix_keep]
+  
+  # edgeR pipeline
+  
+  # normalization factors
+  if (normalize & norm_factors == "TMM") {
+    norm_factors <- calcNormFactors(counts, method = "TMM")
+  }
+  
+  # note: when using DGEList object, column sums are automatically used for library sizes
+  if (normalize) {
+    y <- DGEList(counts, norm.factors = norm_factors)
+  } else {
+    y <- DGEList(counts)
+  }
+  
+  # estimate dispersions
+  # (note: using 'trend.method = "none"' by default)
+  y <- estimateDisp(y, design, trend.method = trend_method)
+  
+  # fit models
+  fit <- glmFit(y, design)
+  
+  # likelihood ratio tests
+  resList = list()
+  for(i in 1:ncol(contrast)){
+    lrt <- glmLRT(fit, contrast = contrast[,i])
+    top <- edgeR::topTags(lrt, n = Inf, adjust.method = "BH", sort.by = "none")
+    row_data = top$table
+    if(length(cluster_id)!=length(cluster_id_all)){
+      missing_clusts = cluster_id_all[!cluster_id_all%in%cluster_id]
+      missing = matrix(nrow = length(missing_clusts),ncol = ncol(row_data))
+      rownames(missing) = missing_clusts
+      colnames(missing) = colnames(top)
+      row_data = rbind(row_data,missing)
+      row_data = row_data[cluster_id_all,]
+    }
+    resList[[i]] = row_data
+  }
+  names(resList) = colnames(contrast)
+  
+  
+  logFCFrame = do.call(cbind,lapply(resList,function(x)x[,"logFC"]))
+  colnames(logFCFrame) = colnames(contrast)
+  rownames(logFCFrame) = cluster_id_all
+  
+  adjpFrame = do.call(cbind,lapply(resList,function(x)x[,"FDR"]))
+  colnames(adjpFrame) = colnames(contrast)
+  rownames(adjpFrame) = cluster_id_all
+  
+  pFrame = do.call(cbind,lapply(resList,function(x)x[,"PValue"]))
+  colnames(pFrame) = colnames(contrast)
+  rownames(pFrame) = cluster_id_all
+  
+  list(p.adjFrame = adjpFrame,pFrame = pFrame,logFCFrame = logFCFrame)
+}
+
+```
+
+```{r}
+load("Data/All/Data.RData")
+```
+
+# Flow
+
+```{r}
+load("results/Flow/Gating Results/bcell.RData")
+load("results/Flow/Gating Results/tcell.RData")
+load("results/Flow/Gating Results/monocyte.RData")
+load("results/Flow/Gating Results/dcnk.RData")
+flow = list()
+flow$panelResults = list(bcell=bcell,dcnk=dcnk,monocyte=monocyte,tcell=tcell)
+rm(bcell,dcnk,monocyte,tcell)
+
+flow$propsLong = do.call(rbind,lapply(flow$panelResults,function(x){x$propsLong}))
+flow$propsWide = pivot_wider(flow$propsLong,id_cols = id,names_from = cluster,values_from = freq)%>%column_to_rownames("id")
+flow$ncells = pivot_wider(flow$propsLong,id_cols = id,names_from = cluster,values_from = n)%>%column_to_rownames("id")
+flow$total_cells = pivot_wider(flow$propsLong,id_cols = id,names_from = cluster,values_from = total)%>%column_to_rownames("id")
+
+has_sample_data = gsub("_.*","",rownames(flow$propsWide))%in%rownames(data$sampleData)
+
+flow$propsLong = flow$propsLong[flow$propsLong$id%in%rownames(flow$propsWide)[has_sample_data],]
+flow$propsWide  = flow$propsWide[has_sample_data,]
+flow$ncells = flow$ncells[has_sample_data,]
+flow$total_cells = flow$total_cells[has_sample_data,]
+
+
+flow$data = lapply(data[names(unlist(sapply(data,nrow)))[unlist(sapply(data,nrow))==332]],function(x){
+  x[gsub("_.*","",rownames(flow$propsWide)),]
+})
+
+flow$panel = gsub("\\..*","",rownames(flow$propsLong))[match(colnames(flow$propsWide),flow$propsLong$cluster)]
+flow$panel = c("T Cell","B Cell","DCNK","Monocyte")[match(flow$panel,c("tcell","bcell","dcnk","monocyte"))]
+flow$panel[9:11] = "NK"
+flow$panel[12:15] = "DC"
+flow$propsLong$cluster = gsub(" NK Cells","",flow$propsLong$cluster)
+
+
+flow$cluster = colnames(flow$propsWide)
+colnames(flow$propsWide) = paste0(flow$panel," - ",colnames(flow$propsWide))
+colnames(flow$propsWide) = gsub("yd","gd",colnames(flow$propsWide))
+colnames(flow$propsWide) = gsub(" NK Cells","",colnames(flow$propsWide))
+flow$propsLong$cluster = gsub("yd","gd",flow$propsLong$cluster)
+```
+
+## Differential Expression
+
+### Pairwise DA heatmap
+
+```{r}
+all_panels = c("bcell","dcnk","monocyte","tcell")
+daRes = list()
+for(i in 1:length(all_panels)){
+  keep = flow$panelResults[[all_panels[i]]]$sampleData$Condition=="Patient" & 
+    flow$panelResults[[all_panels[i]]]$sampleData$days_of_prior_antibiotics==0 &
+    !duplicated(flow$panelResults[[all_panels[i]]]$sampleData$sample) &
+    !is.na(flow$panelResults[[all_panels[i]]]$sampleData$sample) &
+    !is.na(flow$panelResults[[all_panels[i]]]$sampleData$days_of_prior_antibiotics) &
+    !is.na(flow$panelResults[[all_panels[i]]]$sampleData$sample_id)
+  counts = t(flow$panelResults[[all_panels[i]]]$ncells)
+  keep = keep & apply(counts,2,function(x)sum(is.na(x))<length(x)) & !is.na(keep)
+  counts = counts[,keep]
+  counts[is.na(counts)] = 0
+  time = flow$panelResults[[all_panels[i]]]$sampleData$time[keep]
+  id = flow$panelResults[[all_panels[i]]]$sampleData$Subject_ID[keep]
+  design = model.matrix(~0+time+id)
+  contrast = makeContrasts(timeT1 - timeT2,
+                           timeT1 - timeT3,
+                           timeT1 - timeT4,
+                           timeT2 - timeT3,
+                           timeT2 - timeT4,
+                           timeT3 - timeT4,
+                           levels=design)
+  counts
+  daRes[[i]] = testDA_edgeR(counts,design = design,contrast = contrast,min_cells = 3)
+}
+
+p = do.call(rbind,lapply(daRes,function(x)x[["p.adjFrame"]]))
+d = do.call(rbind,lapply(daRes,function(x)x[["logFCFrame"]]))
+
+
+d = na.omit(d)
+d = d[!grepl("Dump|Debris|DP |DN ",rownames(d)),]
+p = p[rownames(d),]
+
+d = d[apply(p,1,function(x)sum(x<0.05)>0),]
+p = p[rownames(d),]
+
+colnames(d) = gsub("time","",colnames(d))
+rownames(d) = paste0(flow$panel[match(rownames(d),flow$cluster)]," - ",rownames(d))
+rownames(p) = paste0(flow$panel[match(rownames(p),flow$cluster)]," - ",rownames(p))
+
+col_fun = circlize::colorRamp2(c(-2.15, 0, 2.15), c("blue", "white","red"))
+
+cell_fun = function(j, i, x, y, width, height, fill) {
+  txt = returnSigStars(p[i, j])
+  if(txt=="ns")txt = ""
+  grid.text(txt, x, y, gp = gpar(fontsize = 18),vjust=.8)
+}
+hc1 = hclust(dist(d),method = "ward.D2")
+hm = Heatmap(matrix = d,
+             cluster_columns = F,
+             cell_fun = cell_fun,
+             col = col_fun,
+             cluster_rows = hc1,
+             # row_names_gp = gpar(fontsize=6),
+             name = "logFC",
+             row_names_gp = gpar(fontsize=24),
+             column_names_gp = gpar(fontsize=28),
+             heatmap_legend_param = list(title="logFC",legend_height=unit(5,"cm"),
+                                         legend_width=unit(5,"cm"),
+                                         labels_gp=gpar(fontsize=32),
+                                         grid_height = unit(3, "cm"),
+                                         grid_width = unit(1, "cm"),
+                                         # title_position = "topcenter",
+                                         title_gp = gpar(fontsize = 24, fontface = "bold")))
+hm = draw(hm,padding=unit(c(1, 1, 1, 4), "cm"),align_heatmap_legend="heatmap_top",heatmap_legend_side="left")
+# hm
+# 
+# png("./figures_final/Flow/AB Naive Pairwise DA.png",width=250*3,height=250*3)
+# hm
+# dev.off()
+
+flowDAPops = p
+pp = p
+
+hm
+```
+
+#### Hierarchical EB Symptoms
+
+```{r}
+filt = flow$data$sampleData$days_post_ab==0&flow$data$sampleData$Condition=="Patient"
+
+all_na = function(x){sum(is.na(x))==length(x)}
+filt[apply(flow$propsWide,1,all_na)] = F
+
+syms = colnames(flow$data$directSymptoms)[colSums(flow$data$directSymptoms[filt,]>0)>5]
+ad = flow$propsWide[filt,!grepl("Dump|Debris|DP |DN |- DN|- DP|UNKN|IL1B",colnames(flow$propsWide))]
+s = flow$data$directSymptoms[filt,syms]
+s$Symptom.Severity = rowSums(s/(length(syms)*max(flow$data$directSymptoms,na.rm = T)))
+syms = c(syms,"Symptom.Severity")
+sd = data.frame(Age=flow$data$sampleData[filt,c("Age_at_Time_of_Study_Entry")])
+em = data.frame(`Number of EM` = flow$data$emData$Number_of_EM_at_Baseline[filt],
+                `Largest EM Dimension` = flow$data$emData$largest_EM_Dimension[filt])
+syms = c(syms,"Age","Number.of.EM","Largest.EM.Dimension")
+d = cbind(ad,s,sd,em)
+c = rcorr(as.matrix(d))
+r = as.data.frame(c$r)
+p = as.data.frame(c$P)
+r_long = rownames_to_column(r) %>% pivot_longer(cols = -rowname)
+p_long = rownames_to_column(p) %>% pivot_longer(cols = -rowname)
+r_long = r_long[p_long$value<0.05,]
+r_long = r_long[!is.na(r_long[,1]),]
+r_long = as.data.frame(r_long)
+r_long = r_long[!r_long$name%in%colnames(ad),]
+r_long = r_long[!r_long$rowname%in%syms,]
+colnames(r_long)[1:2] = c('from','to')
+sub = unique(c(r_long$from,r_long$to))
+r2 = r[sub,sub]
+r_long$from = gsub("\\."," ",r_long$from)
+r_long$to = gsub("\\."," ",r_long$to)
+rownames(r2) = gsub("\\."," ",rownames(r2))
+colnames(r2) = gsub("\\."," ",colnames(r2))
+syms = gsub("\\."," ",syms)
+
+
+# png("forNaeha/Flow Symptom Correlation Network T1.png",width=700,height=500)
+# pheatmap(r2[rownames(r2)%in%syms,!colnames(r2)%in%syms])
+# dev.off()
+
+set_graph_style(plot_margin = margin(1,1,1,1))
+
+hc = hclust(dist(r2))
+
+# k = 9
+# cut = cutree(hc,k=k)
+# cut2 = rep(k+1,length(syms))
+# names(cut2) = syms
+# cut = c(cut,cut2)
+# k = k+1
+k = 4
+cut = cutree(hc,k=k)
+d1 = data.frame(from="origin", to=paste("group", seq(1,k), sep=""))
+d2 = data.frame(from=paste0("group",cut), to=names(cut))
+edges = rbind(d1, d2)
+
+connect = r_long
+
+vertices  <-  data.frame(
+  name = unique(c(as.character(edges$from), as.character(edges$to)))
+) 
+vertices$group  <-  edges$from[ match( vertices$name, edges$to ) ]
+vertices$type = rep('Protein',nrow(vertices))
+vertices$type[vertices$name%in%syms] = "Symptom"
+
+mygraph <- igraph::graph_from_data_frame(edges, vertices=vertices)
+from  <-  match( connect$from, vertices$name)
+to  <-  match( connect$to, vertices$name)
+value = connect$value
+
+get_angle = function(x){
+  x[x>90&x<270] = x[x>90&x<270]-180
+  x
+}
+
+pal = gg_color_hue(k+2)
+pal[(k+1):(k+2)] = c('grey39','black')
+pal = c('grey39','black')
+p = ggraph(mygraph, layout = 'dendrogram', circular = TRUE) + 
+  geom_node_point(aes(filter = leaf, x = x*1.05, y=y*1.05,color=group),show.legend = F,col='black',size=4) +
+  geom_conn_bundle(data = get_con(from = from, to = to,value=value), 
+                   aes(color=value,alpha = abs(value), width = abs(value)), tension = .9) +
+  scale_edge_colour_distiller(palette = "RdBu",direction=-1, limits=c(-1,1)) + 
+  geom_node_text(aes(x = x*1.1, y=y*1.1,filter = leaf, angle = get_angle(node_angle(x, y)), label = name, color = type),
+                 hjust = 'outward', size = 14,show.legend = F,)+
+  scale_color_manual(values = pal)+
+  expand_limits(x = c(-2.6, 2.7), y = c(-2.4, 1.8)) +
+  theme_void() +
+  theme(
+    legend.key.size = unit(60,'pt'),
+    legend.text = element_text(size = 24),
+    legend.title = element_text(size=28),
+    legend.position = "right",
+    plot.margin=unit(c(1,1,1,1),"cm"),
+  )
+# p
+# 
+# png(filename = "./figures_final/Flow/Hierarchical EB Symptoms.png",width = 1440,height = 1280)
+# p
+# dev.off()
+# 
+# rm(filt,all_na,syms,ad,s,em,sd,d,r,p,c,r_long,p_long,hc,cut,d1,d2,edges,vertices,pal,mygraph,from,to,value,connect)
+
+p
+```
