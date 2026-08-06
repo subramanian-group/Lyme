@@ -1,156 +1,1692 @@
 ---
-title: "Untitled"
-format: html
+title: "Figure S5"
+format: gfm
+params:
+  run_full_refit: false
+editor_options: 
+  chunk_output_type: console
 ---
 
-```{r}
-pacman::p_load(flowCore, SingleCellExperiment,flowStats,
-               dplyr,tidyr,tibble,ggplot2,ggpubr,rasterpdf)
-#functions
-gg_color_hue <- function(n) {
-  hues = seq(15, 375, length = n + 1)
-  hcl(h = hues, l = 65, c = 100)[1:n]
+```{r setup, include=FALSE}
+library(here)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(forcats)
+
+# Pull the parameter from YAML into the R environment
+run_full_refit <- params$run_full_refit
+
+theme_set(theme_minimal(base_family = "Arial"))
+update_geom_defaults("text", list(family = "Arial"))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+conflicted::conflict_prefer("setequal", "base", quiet = TRUE)
+conflicted::conflict_prefer("intersect", "base", quiet = TRUE)
+
+figure_output_dir <- here::here("fig_s5_files")
+dir.create(figure_output_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+## Processed figure input
+
+```{r load_benchmark_results}
+auc_results_path <- here::here(
+  "data",
+  "processed",
+  "04_integrative_modeling",
+  "figure_s4_auc_by_split.csv"
+)
+
+model_metadata_path <- here::here(
+  "data",
+  "processed",
+  "04_integrative_modeling",
+  "figure_s4_model_metadata.csv"
+)
+
+benchmark_results_available <- all(file.exists(
+  auc_results_path,
+  model_metadata_path
+))
+
+if (benchmark_results_available) {
+  auc_results <- read.csv(
+    auc_results_path,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  ) |>
+    tibble::as_tibble()
+
+  model_metadata <- read.csv(
+    model_metadata_path,
+    stringsAsFactors = FALSE,
+    check.names = FALSE,
+    na.strings = c("", "NA")
+  ) |>
+    tibble::as_tibble() |>
+    dplyr::mutate(
+      panel_b_label = gsub("\\\\n", "\n", panel_b_label),
+      panel_b_order = as.integer(panel_b_order)
+    )
+
+  required_auc_columns <- c("model", "sim", "auc")
+  missing_columns <- setdiff(required_auc_columns, names(auc_results))
+  if (length(missing_columns) > 0) {
+    stop(
+      "The Figure S5 AUC table is missing: ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+
+  required_metadata_columns <- c(
+    "model", "median_k", "panel_a_universe", "panel_a_type",
+    "panel_b_label", "panel_b_order"
+  )
+  missing_columns <- setdiff(required_metadata_columns, names(model_metadata))
+  if (length(missing_columns) > 0) {
+    stop(
+      "The Figure S5 model metadata table is missing: ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+
+  # The original per-split coefficient-count object was not saved on the
+  # server. Its displayed median K values are preserved explicitly in this
+  # metadata table; see scripts/archive/figure_s4/README.md.
+  format_k <- function(x) {
+    ifelse(
+      abs(x - round(x)) < sqrt(.Machine$double.eps),
+      as.character(round(x)),
+      format(round(x, 1), nsmall = 1, trim = TRUE)
+    )
+  }
+
+  model_metadata <- model_metadata |>
+    dplyr::mutate(label_k = paste0("Med K=", format_k(median_k)))
+
+  results_with_k <- auc_results |>
+    dplyr::mutate(
+      model = as.character(model),
+      sim = as.integer(sim),
+      auc = as.numeric(auc)
+    ) |>
+    dplyr::left_join(model_metadata, by = "model")
+
+  missing_models <- setdiff(
+    unique(model_metadata$model),
+    unique(results_with_k$model)
+  )
+  if (length(missing_models) > 0) {
+    stop(
+      "The Figure S5 AUC table is missing models: ",
+      paste(missing_models, collapse = ", ")
+    )
+  }
+
+  unmatched_models <- setdiff(
+    unique(results_with_k$model),
+    unique(model_metadata$model)
+  )
+  if (length(unmatched_models) > 0) {
+    stop(
+      "The Figure S5 metadata table is missing models: ",
+      paste(unmatched_models, collapse = ", ")
+    )
+  }
+
+  best_fair_k <- model_metadata |>
+    dplyr::filter(panel_b_label == "Fair-K") |>
+    dplyr::pull(model)
+
+  if (length(best_fair_k) != 1) {
+    stop("Exactly one model must be labeled Fair-K in panel B metadata.")
+  }
+
+  benchmark_set <- model_metadata |>
+    dplyr::filter(!is.na(panel_b_order)) |>
+    dplyr::arrange(panel_b_order) |>
+    dplyr::pull(model)
+
+  competitor_map <- model_metadata |>
+    dplyr::filter(!is.na(panel_a_universe)) |>
+    dplyr::transmute(
+      model,
+      universe = panel_a_universe,
+      type = panel_a_type
+    )
+} else {
+  message(
+    "Figure S5 inputs are unavailable: ",
+    auc_results_path,
+    " and ",
+    model_metadata_path
+  )
+}
+```
+
+## Optional full model refit
+
+Routine renders use the compact per-split results above. To rebuild the
+published panels and rerun the nested cross-validation analysis from the
+underlying assay objects, render with:
+
+```text
+quarto render fig_s5.qmd -P run_full_refit:true
+```
+
+```{r full_refit_libraries, eval=run_full_refit}
+library(glmmLasso)
+library(caret)
+library(future)
+library(furrr)
+library(progressr)
+library(webchem)
+library(readr)
+library(tidyr)
+library(purrr)
+library(janitor)
+
+options(expressions = 10000)
+```
+
+```{r infrastructure, eval=run_full_refit}
+available_cores <- parallel::detectCores(logical = TRUE)
+workers <- max(1, min(24, available_cores - 2))
+future::plan(future::multisession, workers = workers)
+progressr::handlers(global = TRUE)
+progressr::handlers("txtprogressbar")
+```
+
+### Published panel construction
+
+```{r published_panels, eval=run_full_refit}
+published_panel_dir <- here::here(
+  "data", "raw", "04_integrative_modeling", "published_panels"
+)
+metabolon_superset_path <- here::here(
+  "data", "intermediate", "04_integrative_modeling",
+  "metabolon_superset.csv"
+)
+
+source_paths <- c(
+  fitzgerald = file.path(
+    published_panel_dir,
+    "fitzgerald_supplementary_table_1.csv"
+  ),
+  kehoe = file.path(published_panel_dir, "kehoe_table_5.csv"),
+  molins = file.path(
+    published_panel_dir,
+    "molins_supplementary_table_1.csv"
+  ),
+  metabolon_superset = metabolon_superset_path
+)
+
+missing_source_files <- source_paths[!file.exists(source_paths)]
+if (length(missing_source_files) > 0L) {
+  stop(
+    "Missing published-panel source files: ",
+    paste(missing_source_files, collapse = ", ")
+  )
 }
 
+metabolon_superset <- readr::read_csv(
+  metabolon_superset_path,
+  col_types = readr::cols(
+    CHEMICAL_ID = readr::col_character(),
+    PUBCHEM = readr::col_character(),
+    CAS = readr::col_character(),
+    cid = readr::col_character()
+  )
+)
 
-rep = list.files("data/Flow/representative clustering/",full.names = T)
-for(i in 1:length(rep)){
-  load(rep[i])
+lookup_pubchem_cids <- function(query, from = "name", attempts = 3L) {
+  if (is.na(query) || !nzchar(trimws(query)) || query == "-") {
+    return(NA_character_)
+  }
+
+  q_clean <- trimws(query)
+
+  # Hardcoded CID dictionary for structures mapped across panels
+  cid_dict <- c(
+    "Theobromine" = "5429",
+    "Tryptophan" = "6305",
+    "Piperine" = "638024",
+    "Phenylalanine" = "6140",
+    "10-Nitrooleate" = "24836820",
+    "9,10-DiHOME" = "9966640",
+    "Cholesteryl acetate" = "2723897",
+    "C16 Sulfatide" = "9897094",
+    "Ile Leu Trp" = "145456198",
+    "DL-Stearoylcarnitine" = "6426855",
+    "Resolvin E2" = "16061125",
+    "LysoPC(14:0)" = "460604",
+    "Trans-2, 3, 4-Trimethoxycinnamate" = "735841",
+    "Bilirubin" = "5280352",
+    "Gamma-Linolenic acid" = "5280933",
+    "PGA3" = "5283112",
+    "-(-)-Morphine" = "5288826",
+    "PG(22:1(11Z)/0:0)" = "52927449",
+    "PI(22:0/22:0)" = "75961244",
+    "TG(16:0/16:0/16:0)" = "11147",
+    "Phe Trp" = "134906",
+    "DG(18:2(9Z,12Z)/18:3(9Z,12Z,15Z)/0:0)[iso2]" = "9543737",
+    "DG(18:1(11E)/16:0/0:0)" = "5283470",
+    "Ala Cys Asp Arg" = "44564339",
+    "Asp His Pro Tyr" = "135529004",
+    "PI(O-16:0/16:1(9Z))" = "52928422",
+    "Ile Ile Lys Val" = "71402611",
+    "PG(12:0/17:0)" = "52926315"
+  )
+
+  if (q_clean %in% names(cid_dict)) {
+    return(unname(cid_dict[q_clean]))
+  }
+
+  # Fallback to local lookup in metabolon_superset
+  if (exists("metabolon_superset") && "BIOCHEMICAL_NAME" %in% names(metabolon_superset)) {
+    match_idx <- match(tolower(q_clean), tolower(metabolon_superset$BIOCHEMICAL_NAME))
+    if (!is.na(match_idx)) {
+      match_val <- metabolon_superset$PUBCHEM[match_idx]
+      if (!is.na(match_val)) {
+        return(as.character(match_val))
+      }
+    }
+  }
+
+  NA_character_
 }
-rep = list(mono=mono,dcnk=dcnk,bcell=bcell,tcell=tcell)
-rm(mono,dcnk,bcell,tcell)
 
+fitzgerald_source <- readr::read_csv(
+  source_paths[["fitzgerald"]],
+  show_col_types = FALSE
+)
 
-plot_flow = function(sce,x,y,ids,cluster_col='clust',assay = 'counts',title = 'Population'){
-  keep = sce$sample_id%in%ids
-  id = sce$sample_id[keep]
-  cluster = sce@colData[keep,cluster_col]
-  d = data.frame(t(assay(sce))[keep,c(x,y)],
-                 population=cluster,
-                 id=id)
-  ggplot(d,aes_string(x=x,y=y,color="population"))+
-    geom_point(cex=.2,alpha=.25)+
-    guides(colour = guide_legend(override.aes = list(size=4,alpha=1),
-                                 nrow = 1,
-                                 title = title))+
-    # facet_wrap(vars(id),nrow=1)+
-    # stat_density_2d(aes(fill = ..level..), geom = "polygon",contour_var = 'ndensity') +
-    # scale_fill_viridis_c(alpha = .25)+
-    # geom_density_2d_filled(contour_var = "ndensity",adjust=2,alpha=.5)+
-    # scale_fill_distiller(palette = "Blues", direction = 1) +
-    theme_minimal(base_size = 10)+
-    theme(legend.position="top")
+# Molins Supplementary Table 1 contains 95 molecular features. The published
+# LASSO and classification-tree flags define the 24-feature candidate panel.
+molins_source <- readr::read_csv(
+  source_paths[["molins"]],
+  show_col_types = FALSE
+) |>
+  janitor::clean_names() |>
+  dplyr::rename(
+    predicted_formula = compound_predicted_formula,
+    predicted_structure =
+      predicted_chemical_structure_based_on_accurate_mass_a,
+    in_lasso = m_fs_in_lasso_model,
+    in_lda = m_fs_in_lda_model,
+    in_ct = m_fs_in_ct_model
+  )
+
+molins_selected <- molins_source |>
+  dplyr::filter(
+    predicted_formula != "-",
+    in_lasso == "x" | in_ct == "x"
+  ) |>
+  dplyr::mutate(
+    pubchem_cid_from_name = purrr::map(
+      predicted_structure,
+      lookup_pubchem_cids
+    )
+  ) |>
+  tidyr::unnest_longer(
+    pubchem_cid_from_name,
+    values_to = "pubchem_cid_from_name"
+  ) |>
+  dplyr::group_by(mf_number) |>
+  dplyr::slice_head(n = 1L) |>
+  dplyr::ungroup()
+
+# These assignments are the retained results of the original formula and
+# synonym fallback for structures that PubChem does not resolve by name.
+molins_formula_matches <- tibble::tribble(
+  ~mf_number, ~pubchem_cid_from_formula,
+  5,          "5288826",
+  11,         "52927449",
+  20,         "5283470",
+  27,         "44564339",
+  28,         "75961244",
+  35,         "11147",
+  37,         "135529004",
+  44,         "52928422",
+  50,         "134906",
+  52,         "71402611",
+  76,         "9543737",
+  87,         "52926315"
+)
+
+molins_mapping <- molins_selected |>
+  dplyr::left_join(molins_formula_matches, by = "mf_number") |>
+  dplyr::mutate(
+    pubchem_cid = dplyr::coalesce(
+      pubchem_cid_from_formula,
+      pubchem_cid_from_name
+    )
+  ) |>
+  dplyr::filter(!is.na(pubchem_cid))
+
+# Kehoe Table 5 reports 42 structurally identified metabolites. Level-1
+# identities are resolved by name; the four level-2 lipid/peptide identities
+# retain the explicit PubChem assignments used in the original analysis.
+kehoe_source <- readr::read_csv(
+  source_paths[["kehoe"]],
+  show_col_types = FALSE
+) |>
+  dplyr::rename(
+    rt_min = `RT (m)`,
+    mz = `m/z`,
+    structural_id = `Structural ID`,
+    level = Level,
+    msms = `MS/MS`,
+    description = Description
+  )
+
+kehoe_level_1 <- kehoe_source |>
+  dplyr::filter(level == 1) |>
+  dplyr::mutate(
+    pubchem_cid = purrr::map(structural_id, lookup_pubchem_cids)
+  ) |>
+  tidyr::unnest_longer(pubchem_cid)
+
+kehoe_level_2 <- kehoe_source |>
+  dplyr::filter(level == 2) |>
+  dplyr::mutate(
+    pubchem_cid = dplyr::case_when(
+      grepl("^Phe.Phe$", structural_id, useBytes = TRUE) ~ list("6993090"),
+      structural_id ==
+        "14(15)-Epoxy-5Z,8Z,11Z-eicosatrienoic acid [M-H2O]+" ~
+        list("5283205"),
+      structural_id == "PC(O-18:0/0:0)" ~ list(c("2733532", "3985")),
+      structural_id == "PC(P-16:0/0:0)" ~ list("10917802"),
+      TRUE ~ list(NA_character_)
+    )
+  ) |>
+  tidyr::unnest_longer(pubchem_cid)
+
+kehoe_mapping <- dplyr::bind_rows(kehoe_level_1, kehoe_level_2)
+kehoe_mapping <- kehoe_mapping |>
+  dplyr::filter(!is.na(pubchem_cid))
+
+# Fitzgerald Supplementary Table 1 reports 106 small-molecule metabolites.
+# Only level-1 or level-2 identifications can be mapped by chemical identity.
+fitzgerald_mapping <- fitzgerald_source |>
+  dplyr::filter(!is.na(`ID level`), !is.na(`Best ID`)) |>
+  dplyr::mutate(
+    pubchem_cid = purrr::map(`Best ID`, lookup_pubchem_cids)
+  ) |>
+  tidyr::unnest_longer(pubchem_cid) |>
+  dplyr::filter(!is.na(pubchem_cid))
+
+published_metabolite_features <- dplyr::bind_rows(
+  Fitzgerald = metabolon_superset |>
+    dplyr::filter(cid %in% fitzgerald_mapping$pubchem_cid),
+  Kehoe = metabolon_superset |>
+    dplyr::filter(cid %in% kehoe_mapping$pubchem_cid),
+  Molins = metabolon_superset |>
+    dplyr::filter(cid %in% molins_mapping$pubchem_cid),
+  .id = "published_panel"
+) |>
+  dplyr::distinct(published_panel, BIOCHEMICAL_NAME)
+
+# Protein identities reported by Soloski, Aucott, and Zhou. The model uses
+# only the intersection of this published set with proteins measured here.
+published_protein_panel <- tibble::tribble(
+  ~study,    ~reported_analyte,  ~gene_symbol,
+  "Soloski", "CXCL9",            "CXCL9",
+  "Soloski", "CXCL10",           "CXCL10",
+  "Soloski", "CCL19",            "CCL19",
+  "Soloski", "Serum amyloid A",  "SAA1;SAA2",
+  "Soloski", "CRP",              "CRP",
+  "Aucott",  "CCL19",            "CCL19",
+  "Aucott",  "Ferritin",         "FTH1;FTL",
+  "Aucott",  "Fibrinogen",       "FGA;FGB;FGG",
+  "Aucott",  "CXCL10",           "CXCL10",
+  "Aucott",  "CXCL9",            "CXCL9",
+  "Aucott",  "CRP",              "CRP",
+  "Aucott",  "Serum amyloid A",  "SAA1;SAA2",
+  "Zhou",    "AFM",              "AFM",
+  "Zhou",    "ALDOB",            "ALDOB",
+  "Zhou",    "APOA4",            "APOA4",
+  "Zhou",    "APOB",             "APOB",
+  "Zhou",    "C9",               "C9",
+  "Zhou",    "CFHR1",            "CFHR1",
+  "Zhou",    "CRP",              "CRP",
+  "Zhou",    "CST6",             "CST6",
+  "Zhou",    "F9",               "F9",
+  "Zhou",    "FBP1",             "FBP1",
+  "Zhou",    "GC",               "GC",
+  "Zhou",    "ITIH2",            "ITIH2",
+  "Zhou",    "ITIH4",            "ITIH4",
+  "Zhou",    "PF4",              "PF4",
+  "Zhou",    "PGLYRP2",          "PGLYRP2",
+  "Zhou",    "S100A9",           "S100A9"
+) |>
+  tidyr::separate_longer_delim(gene_symbol, delim = ";")
+
+processed_data_env <- new.env(parent = baseenv())
+load(
+  here::here(
+    "data", "processed", "01_proteomics_metabolomics", "Data.RData"
+  ),
+  envir = processed_data_env
+)
+processed_omics <- processed_data_env$data
+
+measured_protein_features <- dplyr::bind_rows(
+  processed_omics$featureData |>
+    dplyr::transmute(
+      assay = "immune",
+      measured_feature = protein,
+      gene_symbol = fixedName
+    ),
+  processed_omics$featureDataNew |>
+    dplyr::transmute(
+      assay = "physiologic",
+      measured_feature = protein,
+      gene_symbol = fixedName
+    )
+)
+
+published_protein_features <- measured_protein_features |>
+  dplyr::semi_join(
+    published_protein_panel |>
+      dplyr::distinct(gene_symbol),
+    by = "gene_symbol"
+  ) |>
+  dplyr::distinct(assay, measured_feature, gene_symbol)
+
+observed_panel_counts <- published_metabolite_features |>
+  dplyr::count(published_panel) |>
+  tibble::deframe()
+
+expected_proteins <- c("CCL19", "CXCL9", "CXCL10", "FBP1")
+if (!setequal(published_protein_features$gene_symbol, expected_proteins)) {
+  stop(
+    "The measured overlap with the published protein panel changed. ",
+    "Observed proteins: ",
+    paste(sort(published_protein_features$gene_symbol), collapse = ", ")
+  )
 }
 
+panel_reconstruction <- dplyr::bind_rows(
+  published_metabolite_features |>
+    dplyr::count(published_panel, name = "measured_features"),
+  tibble::tibble(
+    published_panel = "Proteomic panel",
+    measured_features = dplyr::n_distinct(
+      published_protein_features$measured_feature
+    )
+  )
+)
+message(
+  "Reconstructed metabolite panel counts: ",
+  paste(
+    names(observed_panel_counts),
+    observed_panel_counts,
+    sep = "=",
+    collapse = ", "
+  )
+)
+print(panel_reconstruction)
+```
 
-sam = as.character(unique(rep$mono$sample_id))[1]
+### Preserved pilot calculation
 
-mono = list()
-title = ''
-mono[[1]] = plot_flow(sce = rep$mono,
-                      x = 'CD16',
-                      y = 'CD14',
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-mono[[2]] = plot_flow(sce = rep$mono,
-                      x = 'CD14',
-                      y = 'HLADR',
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-mono[[3]] = plot_flow(sce = rep$mono,
-                      x = 'CD16',
-                      y = 'HLADR',
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-mono = ggarrange(plotlist = mono,nrow = 1,common.legend = T)
+```{r preliminary, eval=FALSE}
+# How many outer resamples do we need to estimate the final mean AUC precisely?
 
-dcnk = list()
-title = ""
-dcnk[[1]] = plot_flow(sce = rep$dcnk,
-                      x="CD56",
-                      y="HLADR",
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-dcnk[[2]] = plot_flow(sce = rep$dcnk,
-                      x="CD56",
-                      y="CD123",
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-dcnk[[3]] = plot_flow(sce = rep$dcnk,
-                      x="CD56",
-                      y="CD11c",
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-dcnk[[4]] = plot_flow(sce = rep$dcnk,
-                      x="CD16",
-                      y="CD56",
-                      ids = sam,
-                      cluster_col = 'clust',
-                      title = title)
-dcnk = ggarrange(plotlist = dcnk,nrow = 1,common.legend = T)
+## ------------------------------
+## Inputs you may tweak
+## ------------------------------
+Npilot           <- 40          # pilot splits to estimate SD of AUC
+target_halfwidth <- 0.01        # desired 95% CI half-width for mean AUC
+buffer_factor    <- 1.25        # 25% buffer applied to required R
+lambda_min       <- 5           # λ range (log-spaced)
+lambda_max       <- 30
+lambda_n         <- 12
+corr_cutoff      <- 0.75        # correlation pruning threshold
+max_resample     <- 50          # max tries to get stratified test set
 
+## ------------------------------
+## Load and prepare data (unchanged defaults downstream)
+## ------------------------------
+load(here::here(
+  "data", "raw", "01_proteomics_metabolomics", "OlinkPreprocessed.RData"
+))
+sampleData <- data$sampleData
 
-bcell = list()
-title = ''
-bcell[[1]] = plot_flow(sce = rep$bcell,
-                       x="IgD",
-                       y="CD27",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-bcell[[2]] = plot_flow(sce = rep$bcell,
-                       x="CD38",
-                       y="CD24",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-bcell[[3]] = plot_flow(sce = rep$bcell,
-                       x="CD38",
-                       y="CD138",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-bcell[[4]] = plot_flow(sce = rep$bcell,
-                       x="IgM",
-                       y="IgD",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-bcell = ggarrange(plotlist = bcell,nrow = 1,common.legend = T)
+outcomes <- sampleData %>%
+  select(sample, Subject_ID, Condition, time) %>%
+  mutate(
+    infected   = if_else(Condition == "Patient" & time == "T1", 1, 0),
+    sample     = as.factor(sample),
+    Subject_ID = as.factor(Subject_ID),
+    Condition  = as.factor(Condition),
+    time       = as.factor(time)
+  )
 
-tcell = list()
-title = ''
-rep$tcell$clust = rep$tcell@metadata$clusters$main
-tcell[[1]] = plot_flow(sce = rep$tcell,
-                       x="CD4",
-                       y="CD8",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-# rep$tcell$clust = rep$tcell@metadata$clusters$mem
-rep$tcell$clust = c("Cent. Mem","Eff. Mem.", "Naive", "Eff.")[match(rep$tcell@metadata$clusters$mem,unique(rep$tcell@metadata$clusters$mem))]
-tcell[[2]] = plot_flow(sce = rep$tcell,
-                       x="CD45RO",
-                       y="CCR7",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-rep$tcell$clust = rep$tcell@metadata$clusters$ydTCR
-tcell[[3]] = plot_flow(sce = rep$tcell,
-                       x="CD4",
-                       y="ydTCR",
-                       ids = sam,
-                       cluster_col = 'clust',
-                       title = title)
-tcell = ggarrange(plotlist = tcell,nrow = 1,common.legend = F,legend = 'top')
-p = ggarrange(mono,dcnk,bcell,tcell,ncol=1)
-# p
+load(here::here(
+  "data", "processed", "01_proteomics_metabolomics", "Data.RData"
+))
+metabolic_data   <- data$metabolon$pat_data %>% rownames_to_column("sample")
+immune_data      <- data$data %>% select(1:sample) %>% relocate(sample)
+physiologic_data <- data$olinkNew %>%
+  as.data.frame() %>% filter(if_any(everything(), ~ !is.na(.))) %>%
+  rownames_to_column("sample")
+
+## ------------------------------
+## Helpers
+## ------------------------------
+clean_design <- function(df, outcome_df, corr_cut = 0.75) {
+  combined <- inner_join(outcome_df, df, by = "sample")
+  colnames(combined) <- make.names(colnames(combined))
+
+  combined <- combined %>%
+    mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+    select(where(~ !is.numeric(.) || isTRUE(stats::var(., na.rm = TRUE) > 0))) %>%
+    select(where(~ !all(is.na(.))))
+
+  nzv <- caret::nearZeroVar(combined, saveMetrics = TRUE) %>% filter(nzv) %>% rownames()
+  combined <- combined %>% select(-any_of(nzv))
+
+  highly_cor <- combined %>%
+    select(where(is.numeric)) %>%
+    cor(use = "pairwise.complete.obs") %>%
+    caret::findCorrelation(cutoff = corr_cut, names = TRUE)
+
+  combined %>% select(-all_of(highly_cor))
+}
+
+make_formula <- function(clean_df) {
+  # Columns that should NEVER be used as predictors
+  nonpred <- intersect(
+    c("sample", "Subject_ID", "Condition", "time", "infected"),
+    names(clean_df)
+  )
+
+  rhs_vars <- setdiff(names(clean_df), nonpred)
+
+  if (length(rhs_vars) == 0L) {
+    stop("make_formula(): no predictors left after excluding non-predictor columns.")
+  }
+
+  stats::as.formula(
+    paste("infected ~", paste(rhs_vars, collapse = " + "))
+  )
+}
+
+lambda_grid_log <- function(lmin, lmax, n) {
+  lmin <- max(lmin, 1e-4)
+  lmax <- max(lmax, lmin * 1.01)
+  exp(seq(log(lmin), log(lmax), length.out = n))
+}
+
+safe_fit_once <- function(formula_fix, rnd, family, data, lambda) {
+  out <- try(
+    glmmLasso(
+      fix = formula_fix, rnd = rnd, family = family, data = data,
+      lambda = lambda    # keep package defaults (centering/standardization on)
+    ),
+    silent = TRUE
+  )
+  if (inherits(out, "try-error")) NULL else out
+}
+
+auc_from_fit <- function(fit, newdata, y_vec) {
+  p <- predict(fit, newdata = newdata, type = "response") %>% as.numeric()
+  pROC::auc(pROC::roc(response = y_vec, predictor = p, levels = c(0,1), direction = "<")) %>% as.numeric()
+}
+
+subject_split_stratified <- function(df, prop = 0.8, max_tries = 50) {
+  subs <- df$Subject_ID %>% as.character() %>% unique()
+  n_tr <- floor(length(subs) * prop)
+  for (i in seq_len(max_tries)) {
+    tr_sub <- sample(subs, size = n_tr, replace = FALSE)
+    train  <- df %>% filter(Subject_ID %in% tr_sub)
+    test   <- df %>% filter(!Subject_ID %in% tr_sub)
+    if (length(unique(test$infected)) == 2) return(list(train = train, test = test))
+  }
+  warning("Could not guarantee class balance in test after max_tries; proceeding with last draw.")
+  list(train = train, test = test)
+}
+
+# Scan λ, keep only successful fits, pick LOWER λ on AUC ties
+best_auc_with_tiebreak <- function(train_df, test_df, formula_fix, lambda_seq) {
+  rows <- vector("list", length(lambda_seq))
+  k <- 0
+  for (lam in lambda_seq) {
+    fit <- safe_fit_once(formula_fix, list(Subject_ID = ~1), binomial(), train_df, lam)
+    if (!is.null(fit)) {
+      k <- k + 1
+      auc_val <- auc_from_fit(fit, test_df, test_df$infected)
+      rows[[k]] <- tibble(lambda_success = lam, auc = auc_val)
+    }
+  }
+  if (k == 0) return(tibble(lambda_success = NA_real_, auc = NA_real_))
+  df <- bind_rows(rows[seq_len(k)])
+  max_auc <- max(df$auc, na.rm = TRUE)
+  tol <- 1e-12
+  df %>%
+    filter(!is.na(auc), (max_auc - auc) <= tol) %>%
+    slice_min(lambda_success, n = 1)
+}
+
+## ------------------------------
+## Build ONLY the "both" design and formula
+## ------------------------------
+combined_both <- clean_design(
+  purrr::reduce(list(physiologic_data, immune_data, metabolic_data), inner_join, by = "sample"),
+  outcomes, corr_cut = corr_cutoff
+)
+form_both <- make_formula(combined_both)
+
+out_dir <- here("results")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+pilot_results_path <- file.path(out_dir, "pilot_both_per_split_best_auc.csv")
+pilot_summary_path <- file.path(out_dir, "pilot_both_required_sims.csv")
+
+if (file.exists(pilot_results_path) && file.exists(pilot_summary_path)) {
+  pilot_results <- readr::read_csv(
+    pilot_results_path,
+    show_col_types = FALSE
+  )
+  pilot_summary <- readr::read_csv(
+    pilot_summary_path,
+    show_col_types = FALSE
+  )
+  message("Loaded cached pilot results from results/.")
+} else {
+  ## ------------------------------
+  ## Pilot loop (ONLY the "both" model)
+  ## ------------------------------
+  lam_seq <- lambda_grid_log(lambda_min, lambda_max, lambda_n)
+
+  pilot_rows <- vector("list", Npilot)
+  for (sim in seq_len(Npilot)) {
+    sp <- subject_split_stratified(combined_both, prop = 0.8, max_tries = max_resample)
+    best <- best_auc_with_tiebreak(sp$train, sp$test, form_both, lam_seq) %>%
+      mutate(model = "both", sim = sim)
+    pilot_rows[[sim]] <- best
+  }
+
+  pilot_results <- bind_rows(pilot_rows) %>%
+    relocate(model, sim, lambda_success, auc)
+
+  ## ------------------------------
+  ## Pilot summary and required R (+25% buffer)
+  ## ------------------------------
+  pilot_summary <- pilot_results %>%
+    summarise(
+      R_pilot   = sum(!is.na(auc)),
+      mean_auc  = mean(auc, na.rm = TRUE),
+      sd_auc    = sd(auc,  na.rm = TRUE),
+      req_R_95  = ceiling((1.96 * sd_auc / target_halfwidth)^2),
+      req_R_95_with_buffer = ceiling(req_R_95 * buffer_factor)
+    )
+
+  print(pilot_summary)
+
+  readr::write_csv(pilot_results, pilot_results_path)
+  readr::write_csv(pilot_summary, pilot_summary_path)
+}
 
 ```
 
+```{r main_simulation, eval=run_full_refit}
+
+#### ---------------------------------------------------------------
+#### Nested-CV sims + stability (BOTH) + fair-K refits (ties-as-one)
+#### ---------------------------------------------------------------
+set.seed(123)
+
+## ------------------------------
+## Controls
+## ------------------------------
+n_sim        <- 10
+corr_cutoff  <- 0.75
+max_resample <- 50
+
+## ------------------------------
+## Data
+## ------------------------------
+load(here::here(
+  "data", "raw", "01_proteomics_metabolomics", "OlinkPreprocessed.RData"
+))
+sampleData <- data$sampleData
+
+outcomes <- sampleData %>%
+  dplyr::select(sample, Subject_ID, Condition, time) %>%
+  dplyr::mutate(
+    infected   = dplyr::if_else(Condition == "Patient" & time == "T1", 1, 0),
+    sample     = as.factor(sample),
+    Subject_ID = as.factor(Subject_ID),
+    Condition  = as.factor(Condition),
+    time       = as.factor(time)
+  )
+
+load(here::here(
+  "data", "processed", "01_proteomics_metabolomics", "Data.RData"
+))
+metabolic_data   <- data$metabolon$pat_data %>% tibble::rownames_to_column("sample")
+immune_data      <- data$data %>% dplyr::select(1:sample) %>% dplyr::relocate(sample)
+physiologic_data <- data$olinkNew %>%
+  as.data.frame() %>% dplyr::filter(dplyr::if_any(dplyr::everything(), ~ !is.na(.))) %>%
+  tibble::rownames_to_column("sample")
+
+all_assay_data <- purrr::reduce(
+  list(immune_data, physiologic_data, metabolic_data),
+  dplyr::inner_join,
+  by = "sample"
+)
+
+selected_community_patterns <- c(
+  "CTSL1", "sphingosine.1.phosphate", "FOXO1", "PDGF.subunit.B",
+  "ANGPT1", "LAT2", "BANK1", "ITGB1BP2", "^phosphoethanolamine",
+  "SDC4", "STX8", "IL.1ra"
+)
+
+community_patterns <- c(
+  "N.acetylneuraminate$", "quinolinate", "^kynurenine", "HODE",
+  "1-linoleoyl.GPE..18.2\\)\\*", "1-stearoyl-2-oleoyl-GPS..18.0.18.1.",
+  "^hexanoylglutamine$", "^adenosine.5", "^sphinganine$",
+  "^sphingosine$", "^phosphoethanolamine$",
+  "oleoylcarnitine \\(C18.1\\)", "tetradecanedioate \\(C14-DC\\)",
+  "sebacate \\(C10.DC.", "hexadecanedioate \\(C16.DC.",
+  "dodecenedioate \\(C12.1.DC..", "hypoxanthine",
+  "sphingosine.1.phosphate", "FOXO1", "ITGB1BP2", "ERBB2IP", "YES1",
+  "LAT2", "GRAP2", "SNAP23", "CD40.L", "SRC", "STX8", "CD2AP",
+  "DAB2", "ANXA11", "PVALB", "VASH1", "USP8", "TXNDC5", "AIFM1",
+  "SMAD1", "DECR1", "MAX", "COMT", "MGMT", "HSP.27", "ANGPT1",
+  "PDGF.subunit.B", "SDC4", "Dkk.1", "HB.EGF", "LOX.1", "CCL17",
+  "BANK1", "PAR.1", "CRKL", "CA13", "NEMO", "CXCL1.x", "PPP1R2",
+  "STK4", "CEACAM8", "ENO2", "PRKRA", "CXCL11", "THOP1", "MVK",
+  "PILRB", "SEMA3F", "LILRA5", "TYMP", "CTSL1", "TIGAR",
+  "SERPINB8", "Gal.9", "CXCL9", "IL.1ra", "CXCL10", "CCL3",
+  "MIP.1.alpha", "FAM3B"
+)
+
+smallest <- all_assay_data |>
+  dplyr::select(sample, dplyr::matches(selected_community_patterns)) |>
+  janitor::clean_names()
+
+community <- all_assay_data |>
+  dplyr::select(sample, dplyr::matches(community_patterns)) |>
+  janitor::clean_names()
+
+## ------------------------------
+## Helpers
+## ------------------------------
+clean_design <- function(df, outcome_df, corr_cut = 0.75, verbose = FALSE) {
+  # Keep outcome/id factors intact. Apply NZV and correlation pruning only to numeric predictors.
+  nonpred <- c("sample","Subject_ID","Condition","time","infected")
+
+  combined <- dplyr::inner_join(outcome_df, df, by = "sample")
+  colnames(combined) <- make.names(colnames(combined))
+
+  # Impute numeric with column median; drop all-NA columns.
+  combined <- combined %>%
+    dplyr::mutate(dplyr::across(
+      where(is.numeric),
+      ~ ifelse(is.na(.), stats::median(., na.rm = TRUE), .)
+    )) %>%
+    dplyr::select(where(~ !all(is.na(.))))
+
+  # Work on numeric predictors only (exclude nonpred).
+  num_pred <- combined %>%
+    dplyr::select(-dplyr::any_of(nonpred)) %>%
+    dplyr::select(where(is.numeric))
+
+  # Drop zero-variance numeric columns explicitly (prevents NA in cor).
+  if (ncol(num_pred) > 0) {
+    sds <- vapply(num_pred, stats::sd, numeric(1), na.rm = TRUE)
+    num_pred <- num_pred[, sds > 0, drop = FALSE]
+  }
+
+  # NZV on remaining numeric predictors.
+  nzv_names <- character(0)
+  if (ncol(num_pred) > 0) {
+    nzv_tbl   <- caret::nearZeroVar(num_pred, saveMetrics = TRUE)
+    nzv_names <- rownames(nzv_tbl)[nzv_tbl$nzv | nzv_tbl$zeroVar]
+  }
+
+  # Correlation pruning on numeric predictors. Use complete obs; no NA now.
+  highly_cor <- character(0)
+  if (ncol(num_pred) > 1) {
+    R <- stats::cor(num_pred, use = "complete.obs")
+    # guard: if any NA sneak in, drop their columns before findCorrelation
+    if (any(is.na(R))) {
+      keep <- which(colSums(is.na(R)) == 0)
+      if (length(keep) > 1) R <- R[keep, keep, drop = FALSE] else R <- NULL
+    }
+    if (!is.null(R) && ncol(R) > 1) {
+      highly_cor <- caret::findCorrelation(R, cutoff = corr_cut, names = TRUE)
+    }
+  }
+
+  combined %>%
+    dplyr::select(-dplyr::any_of(c(nzv_names, highly_cor)))
+}
+
+make_formula <- function(clean_df) {
+  nonpred <- c("sample","Subject_ID","Condition","time","infected")
+  rhs_vars <- setdiff(names(clean_df), nonpred)
+  if (length(rhs_vars) == 0L) {
+    stop("No predictors left after pruning in make_formula().")
+  }
+  stats::as.formula(paste("infected ~", paste(rhs_vars, collapse = " + ")))
+}
+
+
+lambda_grid_log <- function(lmin, lmax, n) {
+  lmin <- max(lmin, 1e-4); lmax <- max(lmax, lmin * 1.01)
+  exp(seq(log(lmin), log(lmax), length.out = n))
+}
+
+safe_fit_once <- function(formula_fix, rnd, family, data, lambda) {
+  # 1. Identify numeric predictors in the data
+  #    (Exclude the random effect ID and the outcome)
+  rhs_vars <- all.vars(formula_fix)[-1] 
+  
+  # 2. Check for zero-variance columns in this specific subset
+  #    (This happens often in CV folds for sparse metabolomics)
+  bad_vars <- character(0)
+  if (length(rhs_vars) > 0) {
+    # Calculate SD only for the predictors present in data
+    # (Use tryCatch in case a column is non-numeric weirdly)
+    sds <- vapply(data[, rhs_vars, drop=FALSE], function(x) sd(x, na.rm=TRUE), numeric(1))
+    bad_vars <- names(sds)[sds == 0 | is.na(sds)]
+  }
+  
+  # 3. If bad variables exist, remove them from the formula dynamically
+  use_form <- formula_fix
+  if (length(bad_vars) > 0) {
+    keep_vars <- setdiff(rhs_vars, bad_vars)
+    if (length(keep_vars) == 0) return(NULL) # Crash if no predictors left
+    
+    # Reconstruct formula without bad vars
+    use_form <- as.formula(paste("infected ~", paste(keep_vars, collapse = " + ")))
+  }
+  
+  # 4. Fit the model
+  out <- try(
+    glmmLasso(
+      fix = use_form, rnd = rnd, family = family, data = data,
+      lambda = lambda,
+      
+      # --- CORRECT PLACEMENT HERE ---
+      control = list(maxIter = 1000)
+      # ------------------------------
+    ),
+    silent = TRUE
+  )
+  
+  if (inherits(out, "try-error")) NULL else out
+}
+
+auc_from_fit <- function(fit, newdata, y_vec) {
+  p <- predict(fit, newdata = newdata, type = "response") %>% as.numeric()
+  pROC::auc(pROC::roc(response = y_vec, predictor = p, levels = c(0,1), direction = "<")) %>% as.numeric()
+}
+
+subject_split_stratified <- function(df, prop = 0.8, max_tries = 50) {
+  subs <- df$Subject_ID %>% as.character() %>% unique()
+  n_tr <- floor(length(subs) * prop)
+  for (i in seq_len(max_tries)) {
+    tr_sub <- sample(subs, size = n_tr, replace = FALSE)
+    train  <- df %>% dplyr::filter(Subject_ID %in% tr_sub)
+    test   <- df %>% dplyr::filter(!Subject_ID %in% tr_sub)
+    if (length(unique(test$infected)) == 2) return(list(train = train, test = test))
+  }
+  warning("Could not guarantee class balance in test after max_tries; proceeding with last draw.")
+  list(train = train, test = test)
+}
+
+predict_at_lambda <- function(train_df, test_df, formula_fix, lambda) {
+  fit <- safe_fit_once(formula_fix, list(Subject_ID = ~1), binomial(), train_df, lambda)
+  if (is.null(fit)) return(NULL)
+  prob <- predict(fit, newdata = test_df, type = "response") %>% as.numeric()
+  tibble::tibble(sample = test_df$sample, Subject_ID = test_df$Subject_ID,
+                 infected = as.numeric(test_df$infected), prob = prob)
+}
+
+# NEW: inner-CV lambda chooser used in several places
+cv_lambda_auc <- function(train_df, formula_fix, lambda_seq, K = 5) {
+  ids <- train_df %>% dplyr::distinct(Subject_ID, infected)
+
+    ids <- ids %>% dplyr::mutate(fold = sample(rep(seq_len(K), length.out = n())))
+  means <- vapply(lambda_seq, function(lam) {
+    aucs <- numeric(K)
+    for (k in seq_len(K)) {
+      tr_ids <- ids$Subject_ID[ids$fold != k]
+      va_ids <- ids$Subject_ID[ids$fold == k]
+      tr <- train_df %>% dplyr::filter(Subject_ID %in% tr_ids)
+      va <- train_df %>% dplyr::filter(Subject_ID %in% va_ids)
+      fit <- safe_fit_once(formula_fix, list(Subject_ID = ~1), binomial(), tr, lam)
+      aucs[k] <- if (is.null(fit)) NA_real_ else auc_from_fit(fit, va, va$infected)
+    }
+    mean(aucs, na.rm = TRUE)
+  }, numeric(1))
+  lam_star <- min(lambda_seq[which(means == max(means, na.rm = TRUE))])
+  list(lambda = lam_star, cv_auc = max(means, na.rm = TRUE))
+}
+
+## ------------------------------
+## Train-only stability helper
+## ------------------------------
+train_only_stability_both <- function(train_df, form_both, lambda_seq, B = 50, Kfold = 5, seed = 1L) {
+  set.seed(seed)
+  sel_rows <- vector("list", B)
+  
+  # Get unique subjects for stratified resampling
+  # (Assuming binary outcome 'infected' is constant per subject, 
+  #  but simple subject resampling is usually sufficient/safer)
+  u_subs <- unique(train_df$Subject_ID)
+  n_subs <- length(u_subs)
+  
+  for (b in seq_len(B)) {
+    # 1. RESAMPLE: Create a bootstrap sample of SUBJECTS (replacement = TRUE)
+    #    or Subsample (replacement = FALSE, typically 0.8 fraction)
+    #    Let's use Subsampling (0.8) as it is often more stable for Lasso selection.
+    
+    sub_sample_ids <- sample(u_subs, size = floor(0.8 * n_subs), replace = FALSE)
+    
+    # Filter data to this subsample
+    curr_df <- train_df %>% dplyr::filter(Subject_ID %in% sub_sample_ids)
+    
+    # 2. INNER CV: Run CV on this SPECIFIC subsample to find its best Lambda
+    #    (This preserves the rigor you asked for)
+    cvb  <- cv_lambda_auc(curr_df, form_both, lambda_seq, K = Kfold)
+    lamb <- cvb$lambda
+    
+    if (is.na(lamb)) next 
+    
+    # 3. FIT: Fit model on this subsample using the chosen Lambda
+    fit  <- safe_fit_once(form_both, list(Subject_ID = ~1), binomial(), curr_df, lamb)
+    
+    if (is.null(fit)) next
+    
+    coef_vec <- tryCatch({
+      if (is.list(fit$coefficients)) fit$coefficients$beta else fit$coefficients
+    }, error = function(e) setNames(numeric(0), character(0)))
+    
+    nz <- which(coef_vec != 0)
+    if (length(nz) == 0) next
+    
+    sel_rows[[b]] <- tibble::tibble(
+      feature = names(coef_vec)[nz],
+      coef    = as.numeric(coef_vec[nz]),
+      sign    = sign(as.numeric(coef_vec[nz]))
+    )
+  }
+  
+  S <- dplyr::bind_rows(Filter(Negate(is.null), sel_rows))
+  
+  if (nrow(S) == 0) {
+    return(tibble::tibble(feature=character(0), n_sel=integer(0), freq=numeric(0), 
+                          median_coef=numeric(0), pos_frac=numeric(0), 
+                          neg_frac=numeric(0), sign_stab=numeric(0)))
+  }
+  
+  S %>% dplyr::group_by(feature) %>%
+    dplyr::summarise(
+      n_sel        = dplyr::n(),
+      freq         = n_sel / B,
+      median_coef  = stats::median(coef, na.rm = TRUE),
+      pos_frac     = mean(sign > 0, na.rm = TRUE),
+      neg_frac     = mean(sign < 0, na.rm = TRUE),
+      sign_stab    = pmax(pos_frac, neg_frac),
+      .groups      = "drop"
+    ) %>%
+    dplyr::arrange(dplyr::desc(freq), dplyr::desc(abs(median_coef)))
+}
+
+
+## ------------------------------
+## Build designs and formulas
+## ------------------------------
+combined_met  <- clean_design(metabolic_data, outcomes, corr_cut = corr_cutoff)
+combined_prot <- clean_design(
+  purrr::reduce(list(physiologic_data, immune_data),
+                dplyr::inner_join, by = "sample"),
+  outcomes, corr_cut = corr_cutoff
+)
+combined_both <- clean_design(
+  purrr::reduce(list(physiologic_data, immune_data, metabolic_data),
+                dplyr::inner_join, by = "sample"),
+  outcomes, corr_cut = corr_cutoff
+)
+
+panel_metabolites <- function(panel_name) {
+  published_metabolite_features |>
+    dplyr::filter(published_panel == panel_name) |>
+    dplyr::pull(BIOCHEMICAL_NAME)
+}
+
+combined_fitzgerald <- metabolic_data |>
+  dplyr::select(
+    sample,
+    dplyr::any_of(panel_metabolites("Fitzgerald"))
+  ) |>
+  clean_design(outcomes, corr_cut = corr_cutoff)
+
+combined_molins <- metabolic_data |>
+  dplyr::select(
+    sample,
+    dplyr::any_of(panel_metabolites("Molins"))
+  ) |>
+  clean_design(outcomes, corr_cut = corr_cutoff)
+
+combined_kehoe <- metabolic_data |>
+  dplyr::select(
+    sample,
+    dplyr::any_of(panel_metabolites("Kehoe"))
+  ) |>
+  clean_design(outcomes, corr_cut = corr_cutoff)
+
+published_immune_features <- published_protein_features |>
+  dplyr::filter(assay == "immune") |>
+  dplyr::pull(measured_feature)
+published_physiologic_features <- published_protein_features |>
+  dplyr::filter(assay == "physiologic") |>
+  dplyr::pull(measured_feature)
+
+prot_ext_df <- dplyr::inner_join(
+  immune_data |>
+    dplyr::select(sample, dplyr::any_of(published_immune_features)),
+  physiologic_data |>
+    dplyr::select(sample, dplyr::any_of(published_physiologic_features)),
+  by = "sample"
+)
+combined_prot_external <- clean_design(prot_ext_df, outcomes, corr_cut = corr_cutoff)
+
+community_design <- clean_design(community, outcomes, corr_cut = corr_cutoff)
+smallest_design <- clean_design(smallest, outcomes, corr_cut = corr_cutoff)
+
+## Formulas
+form_met            <- make_formula(combined_met)
+form_prot           <- make_formula(combined_prot)
+form_both           <- make_formula(combined_both)
+form_prot_external  <- make_formula(combined_prot_external)
+form_community      <- make_formula(community_design)
+form_smallest       <- make_formula(smallest_design)
+form_fitzgerald     <- make_formula(combined_fitzgerald)
+form_molins         <- make_formula(combined_molins)
+form_kehoe          <- make_formula(combined_kehoe)
+
+# --- GRID DEFINITIONS ---
+
+# 1. Tiny Grid (For Fitzgerald, Kehoe, Molins - ~20-50 vars)
+#    These need small penalties, or they flatline.
+lam_seq_tiny <- lambda_grid_log(0.1, 10, 10)
+
+# 2. Small Grid (For Prot, Smallest, Community - ~90 vars)
+#    Your original range was actually pretty good for these.
+lam_seq_small <- lambda_grid_log(1, 30, 10)
+
+# 3. Large Grid (For Met, Both - ~900+ vars)
+#    These need higher penalties, but now that we fixed the "Rank" crash,
+#    we don't need to go insanely high.
+lam_seq_large <- lambda_grid_log(0.1, 50, 15)
+
+## competitor universes (K per dataset), sanitized once
+nonpred <- c("sample","Subject_ID","Condition","time","infected")
+pred_cols_fitzgerald    <- setdiff(names(combined_fitzgerald),   nonpred)
+pred_cols_kehoe         <- setdiff(names(combined_kehoe),        nonpred)
+pred_cols_molins        <- setdiff(names(combined_molins),       nonpred)
+pred_cols_prot_external <- setdiff(names(combined_prot_external),nonpred)
+
+comp_sets <- tibble::tibble(
+  competitor = c("fitzgerald","kehoe","molins","prot_external"),
+  universe   = list(pred_cols_fitzgerald, pred_cols_kehoe, pred_cols_molins, pred_cols_prot_external)
+) %>%
+  dplyr::mutate(
+    universe = purrr::map(universe, ~ make.names(as.character(.x))),
+    K        = purrr::map_int(universe, length)
+  )
+K_by_comp <- setNames(comp_sets$K, comp_sets$competitor)
+
+## ------------------------------
+## Simulations (outer) with inner-CV λ + per-split fair-K
+## ------------------------------
+B_stab <- 50
+
+# ---- progressr safety guard
+use_progress <- requireNamespace("progressr", quietly = TRUE)
+
+if (use_progress) {
+  # force a basic built-in handler; ignore any stale per-session options
+  progressr::handlers(global = TRUE)
+  progressr::handlers("txtprogressbar")     # or "cli" if you prefer and have {cli} installed
+} else {
+  options(progressr.enable = FALSE)
+}
+
+if (!inherits(future::plan(), "multisession")) {
+  future::plan(future::multisession, workers = workers)
+}
+
+progressr::with_progress({
+  p <- progressr::progressor(steps = n_sim)
+
+  models <- list(
+    both          = list(df = combined_both,       form = form_both),
+    met           = list(df = combined_met,        form = form_met),
+    prot          = list(df = combined_prot,       form = form_prot),
+    community     = list(df = community_design,    form = form_community),
+    smallest      = list(df = smallest_design,     form = form_smallest),
+    fitzgerald    = list(df = combined_fitzgerald, form = form_fitzgerald),
+    kehoe         = list(df = combined_kehoe,      form = form_kehoe),
+    molins        = list(df = combined_molins,     form = form_molins),
+    prot_external = list(df = combined_prot_external, form = form_prot_external)
+  )
+
+
+  sim_out <<- furrr::future_map(
+    seq_len(n_sim),
+    function(sim) {
+      p()
+      # Outer split defined on 'both'
+      sp_both <- subject_split_stratified(models$both$df, prop = 0.8, max_tries = max_resample)
+      tr_ids  <- as.character(sp_both$train$Subject_ID)
+      te_ids  <- as.character(sp_both$test$Subject_ID)
+
+      out_rows  <- vector("list", length(models))
+      sel_rows  <- vector("list", length(models))
+      pred_rows <- vector("list", length(models))
+      i <- 0
+
+      # A) reference models
+      for (nm in names(models)) {
+        i <- i + 1
+        
+# --- NEW LOGIC START ---
+        if (nm %in% c("fitzgerald", "kehoe", "molins", "prot_external")) {
+          # Tiny models (< 50 vars) 
+          # ADDED prot_external HERE
+          current_seq <- lam_seq_tiny
+          
+        } else if (nm %in% c("met", "both")) {
+          # Huge models (> 500 vars)
+          # REMOVED prot_external FROM HERE
+          current_seq <- lam_seq_large
+          
+        } else {
+          # Standard models (prot, smallest, community)
+          current_seq <- lam_seq_small
+        }
+        # --- NEW LOGIC END ---
+        
+        sp   <- list(
+          train = models[[nm]]$df %>% dplyr::filter(Subject_ID %in% tr_ids),
+          test  = models[[nm]]$df %>% dplyr::filter(Subject_ID %in% te_ids)
+        )
+        form <- models[[nm]]$form
+
+        cv   <- cv_lambda_auc(sp$train, form, current_seq, K = 5)
+        
+        lam  <- cv$lambda
+        fit  <- safe_fit_once(form, list(Subject_ID = ~1), binomial(), sp$train, lam)
+        aucv <- if (is.null(fit)) NA_real_ else auc_from_fit(fit, sp$test, sp$test$infected)
+        out_rows[[i]] <- tibble::tibble(model = nm, sim = sim, lambda_success = lam, auc = aucv)
+
+        if (!is.null(fit)) {
+          coef_vec <- tryCatch({
+            if (is.list(fit$coefficients)) fit$coefficients$beta else fit$coefficients
+          }, error = function(e) setNames(numeric(0), character(0)))
+          nz <- which(coef_vec != 0)
+          sel_rows[[i]] <- if (length(nz) == 0) NULL else tibble::tibble(
+            model = nm, sim = sim, feature = names(coef_vec)[nz],
+            coef  = as.numeric(coef_vec[nz]), sign = sign(as.numeric(coef_vec[nz]))
+          )
+          pred_rows[[i]] <- predict_at_lambda(sp$train, sp$test, form, lam) %>%
+            dplyr::mutate(model = nm, sim = sim, lambda_success = lam)
+        }
+      }
+
+  # B) train-only stability (BOTH) + per-competitor fair-K
+      train_df_both <- models$both$df %>% dplyr::filter(Subject_ID %in% tr_ids)
+      
+      # --- CHANGE: Use 'lam_seq_large' here because 'both' is high-dimensional ---
+      stab_train    <- train_only_stability_both(train_df_both, form_both, lam_seq_large,
+                                                 B = B_stab, Kfold = 5, seed = 10L + sim)
+      # ---------------------------------------------------------------------------
+      ranked_global     <- stab_train %>% dplyr::arrange(dplyr::desc(freq), dplyr::desc(abs(median_coef)))
+
+      for (comp in names(K_by_comp)) {
+        Kt  <- K_by_comp[[comp]]
+        
+        # --- CORRECTED LOGIC START ---
+        # We want the frequency of the K-th feature in the ranked list.
+        # If the list has fewer than Kt features, we take the minimum frequency found.
+        
+        if (nrow(ranked_global) == 0) {
+           thr <- NA_real_
+        } else if (nrow(ranked_global) >= Kt) {
+           # Take the frequency of the K-th feature
+           thr <- ranked_global$freq[Kt]
+        } else {
+           # If we don't have K features total, take the lowest frequency available
+           thr <- min(ranked_global$freq, na.rm = TRUE)
+        }
+        # --- CORRECTED LOGIC END ---
+        sel_feats <- if (is.na(thr)) character(0) else
+          ranked_global %>% dplyr::filter(freq >= thr) %>% dplyr::pull(feature) %>% as.character()
+
+        model_name <- paste0("both_fairK_", comp)
+        if (length(sel_feats) == 0) {
+          out_rows[[length(out_rows) + 1L]] <-
+            tibble::tibble(model = model_name, sim = sim, lambda_success = NA_real_, auc = NA_real_)
+          next
+        }
+
+        use_feats <- intersect(sel_feats, names(combined_both))
+        if (length(use_feats) == 0) {
+          out_rows[[length(out_rows) + 1L]] <-
+            tibble::tibble(model = model_name, sim = sim, lambda_success = NA_real_, auc = NA_real_)
+          next
+        }
+
+        base_cols <- intersect(nonpred, names(combined_both))
+        df_small  <- combined_both %>% dplyr::select(dplyr::any_of(c(base_cols, use_feats)))
+        tr_df     <- df_small %>% dplyr::filter(Subject_ID %in% tr_ids)
+        te_df     <- df_small %>% dplyr::filter(Subject_ID %in% te_ids)
+
+        form_fk <- stats::as.formula(paste0("infected ~ ", paste(use_feats, collapse = " + ")))
+# --- CHANGE: Use 'lam_seq_tiny' here because these models are very small ---
+        cv_fk   <- cv_lambda_auc(tr_df, form_fk, lam_seq_tiny, K = 5)
+        # -------------------------------------------------------------------------
+        lam_fk  <- cv_fk$lambda
+
+        fit_fk <- safe_fit_once(form_fk, list(Subject_ID = ~1), binomial(), tr_df, lam_fk)
+        auc_fk <- if (is.null(fit_fk)) NA_real_ else auc_from_fit(fit_fk, te_df, te_df$infected)
+
+        out_rows[[length(out_rows) + 1L]] <-
+          tibble::tibble(model = model_name, sim = sim, lambda_success = lam_fk, auc = auc_fk)
+      }
+
+      list(
+        metrics = dplyr::bind_rows(out_rows),
+        sel     = dplyr::bind_rows(Filter(Negate(is.null), sel_rows)),
+        preds   = dplyr::bind_rows(Filter(Negate(is.null), pred_rows)),
+        ids     = tibble::tibble(sim = sim, train_ids = list(tr_ids), test_ids = list(te_ids))
+      )
+    },
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+})
+
+## ------------------------------
+## Recombine
+## ------------------------------
+results     <- dplyr::bind_rows(lapply(sim_out, `[[`, "metrics")) %>%
+  dplyr::relocate(model, sim, lambda_success, auc)
+predictions <- dplyr::bind_rows(lapply(sim_out, `[[`, "preds")) %>%
+  dplyr::relocate(model, sim, lambda_success, sample, Subject_ID, infected, prob)
+selections  <- dplyr::bind_rows(lapply(sim_out, `[[`, "sel"))
+
+## ------------------------------
+## Stability (BOTH only, across all outer splits)
+## ------------------------------
+stability_both <- selections %>%
+  dplyr::filter(model == "both") %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarise(
+    n_sel        = dplyr::n(),
+    freq         = n_sel / n_sim,
+    median_coef  = stats::median(coef, na.rm = TRUE),
+    pos_frac     = mean(sign > 0, na.rm = TRUE),
+    neg_frac     = mean(sign < 0, na.rm = TRUE),
+    sign_stab    = pmax(pos_frac, neg_frac),
+    pred_sign    = dplyr::if_else(pos_frac >= neg_frac, "+", "-"),
+    .groups      = "drop"
+  ) %>%
+  dplyr::mutate(feature = make.names(as.character(feature))) %>%
+  dplyr::arrange(dplyr::desc(freq), dplyr::desc(abs(median_coef)))
+
+## ------------------------------
+## Competitor universes + diagnostics
+## ------------------------------
+both_all <- setdiff(names(combined_both), nonpred) %>% make.names()
+
+name_check <- tibble::tibble(
+  competitor = comp_sets$competitor,
+  n_universe = purrr::map_int(comp_sets$universe, length),
+  in_both_all = purrr::map_int(comp_sets$universe, ~ sum(.x %in% both_all)),
+  in_stability = purrr::map_int(comp_sets$universe, ~ sum(.x %in% stability_both$feature)),
+  present_not_selected = purrr::map(comp_sets$universe, ~ setdiff(intersect(.x, both_all), stability_both$feature))
+)
+message("\n--- COMPETITOR PRESENCE CHECK ---")
+
+#--- COMPETITOR PRESENCE CHECK ---
+print(name_check %>% dplyr::select(competitor, n_universe, in_both_all, in_stability))
+
+
+diag_comp <- tibble::tibble(
+  competitor = comp_sets$competitor
+) %>% dplyr::mutate(
+  overlap_feats = comp_sets$universe %>% purrr::map(~ intersect(.x, stability_both$feature)),
+  n_universe    = purrr::map_int(comp_sets$universe, length),
+  n_overlap     = purrr::map_int(overlap_feats, length),
+  n_distinct_freq = purrr::map_int(
+    overlap_feats, ~ length(unique(stability_both$freq[match(.x, stability_both$feature)]))
+  )
+)
+message("\n--- OVERLAP WITH BOTH-SELECTION BY COMPETITOR ---")
+
+#--- OVERLAP WITH BOTH-SELECTION BY COMPETITOR ---
+print(diag_comp %>% dplyr::select(competitor, n_universe, n_overlap, n_distinct_freq))
+
+## ------------------------------
+## Summary table
+## ------------------------------
+summary_tbl <- results %>%
+  dplyr::group_by(model) %>%
+  dplyr::summarise(
+    R             = sum(!is.na(auc)),
+    mean_auc      = mean(auc, na.rm = TRUE),
+    sd_auc        = stats::sd(auc, na.rm = TRUE),
+    se_auc        = sd_auc / sqrt(pmax(R, 1)),
+    ci95_half     = 1.96 * se_auc,
+    ci95_low      = mean_auc - ci95_half,
+    ci95_high     = mean_auc + ci95_half,
+    median_lambda = suppressWarnings(stats::median(lambda_success, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(dplyr::desc(mean_auc))
+
+## ------------------------------
+## Save
+## ------------------------------
+dir.create(dirname(auc_results_path), showWarnings = FALSE, recursive = TRUE)
+readr::write_csv(results, auc_results_path)
+
+# Use the newly generated results for the figure panels in this render.
+auc_results <- results
+results_with_k <- auc_results |>
+  dplyr::mutate(
+    model = as.character(model),
+    sim = as.integer(sim),
+    auc = as.numeric(auc)
+  ) |>
+  dplyr::left_join(model_metadata, by = "model")
+benchmark_results_available <- TRUE
+```
+
+```{r plotting, eval=FALSE}
+results2 <- results %>% 
+    mutate(
+    model = factor(
+      model,
+      levels = c(
+        "both", "met", "prot", "community", "smallest",
+        "prot_external", "both_fairK_prot_external",
+        "molins", "both_fairK_molins", 
+        "fitzgerald", "both_fairK_fitzgerald",  
+        "kehoe", "both_fairK_kehoe"
+      )
+      ,
+      # labels = c(
+      #   "Met+Prot", "Only Met", "Only Prot", "Only Community", "Only 12",
+      #   "Soloski;Aucott;Zhou", "Molins", "Fitzgerald", "Kehoe"
+      # )
+    )
+    # ,
+    # cohort = case_when(
+    # model %in% c("Met+Prot", "Only Met", "Only Prot", "Only Community", "Only 12") ~ "This study",
+    # model %in% c("Soloski;Aucott;Zhou", "Molins", "Fitzgerald", "Kehoe") ~ "Other studies"
+    # ) %>% factor(levels = c("This study", "Other studies"))
+  )
+
+summary_tbl2 <- summary_tbl %>% 
+    mutate(
+    model = factor(
+      model,
+      levels = c(
+        "both", "met", "prot", "community", "smallest",
+        "prot_external", "both_fairK_prot_external",
+        "molins", "both_fairK_molins", 
+        "fitzgerald", "both_fairK_fitzgerald",  
+        "kehoe", "both_fairK_kehoe"
+      )
+      ,
+      # labels = c(
+      #   "Met+Prot", "Only Met", "Only Prot", "Only Community", "Only 12",
+      #   "Soloski;Aucott;Zhou", "Molins", "Fitzgerald", "Kehoe"
+      # )
+    )
+    # ,
+    # cohort = case_when(
+    # model %in% c("Met+Prot", "Only Met", "Only Prot", "Only Community", "Only 12") ~ "This study",
+    # model %in% c("Soloski;Aucott;Zhou", "Molins", "Fitzgerald", "Kehoe") ~ "Other studies"
+    # ) %>% factor(levels = c("This study", "Other studies"))
+  )
+
+
+# plot the AUC distributions (filter to desired levels; relabel for display)
+results2 |>
+  ggplot(aes(x = model, y = auc, color = model)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.3) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  stat_compare_means(
+    ref.group = "Met+Prot",
+    method = "wilcox.test",
+    paired = TRUE,
+    label = "p.format",
+    label.y.npc = "bottom",   # position using normalized parent coordinates
+    tip.length = 0.01,        # shorten vertical lines
+    step.increase = 0.02      # small increment to avoid overlap
+  ) +
+  facet_grid(
+    . ~ cohort,              # column facets by cohort
+    scales = "free_x",       # allow separate x-axes per facet
+    space = "free_x",        # equal panel widths for each category set
+    switch = "x"             # optional: move facet labels below
+  ) +
+  theme_minimal() +
+  labs(
+    title = "AUC distributions with Wilcoxon p-values",
+    x = "Model",
+    y = "AUC"
+  ) +
+    scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+    ylim(0.45, 1) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        title = element_blank()
+        )
+
+# plot the Mean AUC with 95% Confidence Intervals (same relabeling)
+summary_tbl2 |>
+  ggplot(aes(x = model, y = mean_auc, color = model)) +
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymin = ci95_low, ymax = ci95_high), width = 0.15) +
+  theme_minimal() +
+    scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+    
+  labs(title = "Mean AUC with 95% Confidence Intervals", x = "Model", y = "AUC") +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        title = element_blank()
+        )
+```
+
+## Panel A
+
+```{r panel_a, eval=benchmark_results_available}
+s5_text_size <- 8 / ggplot2::.pt
+
+plot_data_paired <- results_with_k |>
+  dplyr::inner_join(competitor_map, by = "model") |>
+  dplyr::mutate(
+    universe = dplyr::recode(
+      universe,
+      "Prot Ext" = "External Proteins"
+    ),
+    universe = factor(
+      universe,
+      levels = unique(dplyr::recode(
+        competitor_map$universe,
+        "Prot Ext" = "External Proteins"
+      ))
+    ),
+    type = factor(type, levels = c("Competitor", "Our Method")),
+    type_position = as.numeric(type)
+  )
+
+panel_a_k_labels <- plot_data_paired |>
+  dplyr::group_by(universe) |>
+  dplyr::summarise(
+    label_k = paste(unique(label_k), collapse = " / "),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    x = 1.5,
+    y = 0.4
+  )
+
+p_paired <- ggplot(plot_data_paired, aes(x = type_position, y = auc)) +
+  facet_wrap(~universe, nrow = 1, scales = "free_x") +
+  geom_boxplot(aes(group = type_position), outlier.shape = NA, fill = NA) +
+  geom_line(
+    aes(group = sim, color = as.factor(sim)),
+    alpha = 0.4,
+    linewidth = 0.8
+  ) +
+  geom_point(aes(color = as.factor(sim)), size = 2.5, alpha = 0.9) +
+  geom_text(
+    aes(x = x, y = y, label = label_k),
+    data = panel_a_k_labels,
+    inherit.aes = FALSE,
+    size = s5_text_size,
+    family = "Arial",
+    color = "black"
+  ) +
+  scale_color_viridis_d(option = "plasma", guide = "none") +
+  scale_x_continuous(
+    breaks = c(1, 2),
+    labels = c("Competitor", "Our Method"),
+    limits = c(0.5, 2.5)
+  ) +
+  scale_y_continuous(
+    limits = c(0.35, 1.05),
+    breaks = c(0.4, 0.6, 0.8, 1.0)
+  ) +
+  ylab("AUC") +
+  theme(
+    text = element_text(family = "Arial", size = 8, face = "plain"),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 8
+    ),
+    axis.text.y = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    strip.text = element_text(size = 8),
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    plot.title = element_blank(),
+    plot.subtitle = element_blank()
+  )
+
+panel_a_file <- here::here(
+  "fig_s5_files",
+  "figure_S05a_published_panel_classifier_benchmark.png"
+)
+
+ggsave(
+  panel_a_file,
+  p_paired,
+  device = "png",
+  width = 4.8,
+  height = 2.4,
+  units = "in",
+  dpi = 600
+)
+```
+
+## Panel B
+
+```{r panel_b, eval=benchmark_results_available}
+panel_b_axis_labels <- c(
+  "Community\n(Select)" = "12 Community\nAnalytes",
+  "Fair-K" = "Size-Matched\nMultiomic",
+  "Multi-Omics\n(All)" = "All Multiomic\nAnalytes",
+  "Community\n(All)" = "77 Community\nAnalytes",
+  "Proteomics\n(All)" = "All Proteins",
+  "Metabolomics\n(All)" = "All Metabolites"
+)
+
+panel_b_levels <- model_metadata |>
+  dplyr::filter(!is.na(panel_b_order)) |>
+  dplyr::arrange(panel_b_order) |>
+  dplyr::pull(panel_b_label)
+
+plot_data_bench <- results_with_k |>
+  dplyr::filter(model %in% benchmark_set) |>
+  dplyr::mutate(
+    model_label = factor(panel_b_label, levels = panel_b_levels)
+  )
+
+p_bench <- ggplot(plot_data_bench, aes(x = model_label, y = auc)) +
+  geom_boxplot(outlier.shape = NA, fill = NA) +
+  geom_point(
+    aes(color = as.factor(sim)),
+    position = position_jitter(width = 0.15, height = 0, seed = 123),
+    size = 2.5,
+    alpha = 0.8
+  ) +
+  geom_text(
+    aes(label = label_k, y = 1.035),
+    data = plot_data_bench |>
+      dplyr::group_by(model_label) |>
+      dplyr::slice(1),
+    size = s5_text_size,
+    family = "Arial",
+    color = "gray30"
+  ) +
+  scale_color_viridis_d(option = "plasma", guide = "none") +
+  scale_x_discrete(labels = panel_b_axis_labels) +
+  ylim(NA, 1.08) +
+  ylab("AUC") +
+  theme(
+    text = element_text(family = "Arial", size = 8, face = "plain"),
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(
+      angle = 35,
+      hjust = 1,
+      vjust = 1,
+      size = 8
+    ),
+    axis.text.y = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    plot.title = element_blank(),
+    plot.subtitle = element_blank()
+  )
+
+panel_b_file <- here::here(
+  "fig_s5_files",
+  "figure_S05b_analyte_universe_classifier_benchmark.png"
+)
+
+ggsave(
+  panel_b_file,
+  p_bench,
+  device = "png",
+  width = 4.8,
+  height = 2.4,
+  units = "in",
+  dpi = 600
+)
+
+```
+
+```{r session_info}
+sessionInfo()
+```

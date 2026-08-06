@@ -1,0 +1,470 @@
+---
+title: "Supplementary Figure 12"
+format: gfm
+editor_options:
+  chunk_output_type: console
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+---
+
+```{r libraries}
+#| echo: false
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(xCell)
+  library(emmeans)
+  library(lme4)
+  library(broom)
+  library(here)
+  library(ragg)
+})
+
+theme_set(
+  theme_minimal(base_size = 10, base_family = "Arial")
+)
+
+dir.create(here::here("fig_s12_files"), showWarnings = FALSE)
+```
+
+## Panel A: xCell enrichment effect sizes in public skin and PBMC datasets
+
+```{r figure_S12a_xcell_cohens_d_heatmap}
+#| fig-cap: "Figure S12a"
+
+public_data_environment <- new.env(parent = emptyenv())
+load(
+  here::here(
+    "data", "processed", "03_public_skin_rna", "publicDataClean.RData"
+  ),
+  envir = public_data_environment
+)
+public_data <- public_data_environment$publicData
+
+study_pbmc <- public_data$GSE63085
+study_em <- public_data$GSE154916
+
+meta_pbmc <- study_pbmc$meta |>
+  mutate(
+    type_time = forcats::fct_relevel(
+      type_time,
+      "control_0", "patient_182", "patient_0", "patient_21"
+    )
+  )
+
+meta_em <- study_em$meta
+
+cell_data <- readr::read_csv(
+  here::here(
+    "data", "processed", "03_public_skin_rna", "xCell_Labels.csv"
+  ),
+  show_col_types = FALSE
+) |>
+  dplyr::rename(cell_type = Cell, tissue = Group) |>
+  dplyr::filter(tissue %in% c("Immune", "Skin", "Vascular", "Blood"))
+
+immune_cell_types <- c(
+  "DC", "aDC", "cDC", "iDC", "pDC",
+  "Macrophages", "Macrophages M1", "Macrophages M2",
+  "Monocytes", "Neutrophils", "Eosinophils", "Basophils",
+  "Mast cells", "NK cells", "NKT", "B-cells",
+  "naive B-cells", "Memory B-cells", "Class-switched memory B-cells",
+  "Plasma cells", "pro B-cells", "CD4+ T-cells", "CD4+ naive T-cells",
+  "CD4+ memory T-cells", "CD4+ Tcm", "CD4+ Tem", "Th1 cells",
+  "Th2 cells", "Tregs", "CD8+ T-cells", "CD8+ naive T-cells",
+  "CD8+ Tcm", "CD8+ Tem", "Tgd cells"
+)
+
+other_cell_types <- cell_data |>
+  dplyr::filter(tissue %in% c("Skin", "Vascular", "Blood")) |>
+  dplyr::arrange(tissue, cell_type) |>
+  dplyr::pull(cell_type)
+
+cell_data <- cell_data |>
+  mutate(
+    tissue = factor(tissue, levels = c("Immune", "Skin", "Vascular", "Blood")),
+    cell_type = factor(
+      cell_type,
+      levels = c(
+        rev(immune_cell_types),
+        setdiff(rev(sort(unique(as.character(cell_type)))), immune_cell_types)
+      )
+    )
+  )
+
+deconv_em <- study_em$data |>
+  xCell::xCellAnalysis(
+    cell.types.use = as.character(cell_data$cell_type),
+    rnaseq = FALSE,
+    parallel.sz = 1
+  )
+
+deconv_pbmc <- study_pbmc$data$E |>
+  data.frame(check.names = FALSE) |>
+  tibble::rownames_to_column("ensembl_id") |>
+  dplyr::left_join(
+    tibble::tibble(
+      ensembl_id = study_pbmc$features$X,
+      gene_symbol = study_pbmc$features$gene_symbol
+    ),
+    by = "ensembl_id"
+  ) |>
+  dplyr::filter(!is.na(gene_symbol), gene_symbol != "") |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    row_median = median(c_across(where(is.numeric)), na.rm = TRUE)
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::group_by(gene_symbol) |>
+  dplyr::slice_max(row_median, with_ties = FALSE) |>
+  dplyr::ungroup() |>
+  dplyr::select(-ensembl_id, -row_median) |>
+  tibble::column_to_rownames("gene_symbol") |>
+  as.matrix() |>
+  xCell::xCellAnalysis(
+    cell.types.use = as.character(cell_data$cell_type),
+    rnaseq = TRUE,
+    parallel.sz = 1
+  )
+
+cohen_em <- deconv_em |>
+  as.data.frame() |>
+  tibble::rownames_to_column("cell_type") |>
+  tidyr::pivot_longer(
+    cols = -cell_type,
+    names_to = "sample_id",
+    values_to = "score"
+  ) |>
+  dplyr::left_join(
+    meta_em |>
+      tibble::rownames_to_column("sample_id") |>
+      dplyr::select(sample_id, type, batch),
+    by = "sample_id"
+  ) |>
+  dplyr::group_by(cell_type) |>
+  dplyr::group_modify(~ {
+    model <- stats::lm(score ~ type + batch, data = .x)
+    emmeans::emmeans(model, pairwise ~ type, adjust = "none")$contrasts |>
+      as.data.frame() |>
+      dplyr::transmute(
+        contrast = stringr::str_remove_all(contrast, "[()]"),
+        cohens_d = estimate / stats::sigma(model),
+        p_value = p.value
+      )
+  }) |>
+  dplyr::ungroup()
+
+cohen_pbmc <- deconv_pbmc |>
+  as.data.frame() |>
+  tibble::rownames_to_column("cell_type") |>
+  tidyr::pivot_longer(
+    cols = -cell_type,
+    names_to = "sample_id",
+    values_to = "score"
+  ) |>
+  dplyr::left_join(
+    meta_pbmc |>
+      tibble::rownames_to_column("sample_id") |>
+      dplyr::select(sample_id, id, type_time),
+    by = "sample_id"
+  ) |>
+  dplyr::group_by(cell_type) |>
+  dplyr::group_modify(~ {
+    model <- lme4::lmer(
+      score ~ type_time + (1 | id),
+      data = .x
+    )
+    emmeans::emmeans(model, revpairwise ~ type_time, adjust = "none")$contrasts |>
+      as.data.frame() |>
+      dplyr::transmute(
+        contrast = contrast,
+        cohens_d = estimate / stats::sigma(model),
+        p_value = p.value
+      )
+  }) |>
+  dplyr::ungroup()
+
+xcell_plot_data <- dplyr::bind_rows(cohen_pbmc, cohen_em) |>
+  dplyr::inner_join(cell_data, by = "cell_type") |>
+  dplyr::mutate(
+    contrast = contrast |>
+      stringr::str_replace_all("erythema migrans", "Erythema Migrans") |>
+      stringr::str_replace_all("skin- control", "Control Healthy") |>
+      stringr::str_replace_all("skin control- surgical", "Control Mammary") |>
+      stringr::str_replace_all("patient_0", "Patient Day 0") |>
+      stringr::str_replace_all("patient_21", "Patient Day 21") |>
+      stringr::str_replace_all("patient_182", "Patient Day 182") |>
+      stringr::str_replace_all("control_0", "Control Day 0") |>
+      stringr::str_replace_all(" - ", " \u2013 ")
+  ) |>
+  dplyr::filter(
+    contrast %in% c(
+      "Erythema Migrans \u2013 Control Healthy",
+      "Patient Day 0 \u2013 Control Day 0",
+      "Patient Day 21 \u2013 Control Day 0",
+      "Patient Day 182 \u2013 Control Day 0"
+    )
+  ) |>
+  dplyr::mutate(
+    contrast = factor(
+      contrast,
+      levels = c(
+        "Erythema Migrans \u2013 Control Healthy",
+        "Patient Day 0 \u2013 Control Day 0",
+        "Patient Day 21 \u2013 Control Day 0",
+        "Patient Day 182 \u2013 Control Day 0"
+      )
+    ),
+    sample_type = if_else(
+      stringr::str_detect(contrast, "Erythema"),
+      "Skin (GSE154916)",
+      "PBMC (GSE63085)"
+    ) |>
+      factor(levels = c("Skin (GSE154916)", "PBMC (GSE63085)")),
+    cell_type = factor(cell_type, levels = levels(cell_data$cell_type))
+  )
+
+figure_s12a_plot <- ggplot(
+  xcell_plot_data,
+  aes(
+    x = contrast,
+    y = cell_type,
+    fill = if_else(p_value < 0.05, cohens_d, NA_real_)
+  )
+) +
+  geom_tile(height = 0.95, width = 0.95, position = position_nudge(x = -0.5, y = - 0.5)) +
+  geom_text(
+    aes(
+      label = if_else(
+        p_value < 0.05,
+        sprintf("%.1f", cohens_d),
+        NA_character_
+      )
+    ),
+            size = 2, 
+            nudge_x = -0.5, 
+            nudge_y = -0.5
+  ) +
+  scale_fill_gradient2(
+    low = "#4682B4",
+    mid = "white",
+    high = "#FF0000",
+    midpoint = 0,
+    na.value = "white",
+    guide = "none"
+  ) +
+  facet_grid(
+    tissue ~ sample_type,
+    scales = "free",
+    space = "free",
+    switch = "y"
+  ) +
+  labs(x = "Cohen's d", y = NULL) +
+  theme(
+  axis.text.x = element_text(angle = 90, vjust = -1, hjust = 1, size = 7),
+  axis.text.y = element_text(vjust = 1.25, size = 7),
+    axis.title.x = element_text(size = 7),
+    strip.background = element_rect(fill = "grey90", colour = NA),
+    strip.text = element_text(size = 7),
+    strip.text.x.top = element_text(angle = 90),
+    panel.spacing.x = unit(0.1, "lines"),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(2, 2, 2, 2)
+  )  +
+  coord_cartesian(expand = FALSE) 
+
+figure_s12a <- here::here(
+  "fig_s12_files",
+  "figure_S12a_xcell_cohens_d_heatmap.png"
+)
+
+ragg::agg_png(
+  filename = figure_s12a,
+  width = 2.4,
+  height = 8,
+  units = "in",
+  res = 600
+)
+print(figure_s12a_plot)
+grDevices::dev.off() |> invisible()
+
+knitr::include_graphics(figure_s12a)
+```
+
+## Panel B: fine cell-type abundance in public skin single-cell RNA-seq
+
+```{r figure_S12b_fine_cell_abundance_forest_plot}
+#| fig-cap: "Figure S12b"
+
+skin_abundance <- readr::read_csv(
+  here::here(
+    "data", "processed", "03_public_skin_rna",
+    "GSE169440_subpopulation_abundance.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# B cells, NK cells, neuronal cells, and melanocytes were not subdivided in
+# the fine annotation and are therefore retained from the broad annotation.
+selected_skin_abundance <- dplyr::bind_rows(
+  skin_abundance |>
+    dplyr::filter(
+      type == "subPop",
+      !stringr::str_detect(Identity, regex("unkn|unknown", ignore_case = TRUE))
+    ),
+  skin_abundance |>
+    dplyr::filter(
+      type == "mainPop",
+      Identity %in% c("B Cell", "NK Cells", "Neuronal", "Melanocyte")
+    )
+)
+
+skin_samples <- skin_abundance |>
+  dplyr::distinct(orig.ident, id, condition, total_cells_all)
+
+# Restore explicit zero counts so every cell type is tested in every sample,
+# as in the original cell-level binary logistic regression.
+skin_abundance_complete <- tidyr::crossing(
+  Identity = sort(unique(selected_skin_abundance$Identity)),
+  skin_samples
+) |>
+  dplyr::left_join(
+    selected_skin_abundance |>
+      dplyr::select(Identity, orig.ident, count),
+    by = c("Identity", "orig.ident")
+  ) |>
+  dplyr::mutate(
+    count = tidyr::replace_na(count, 0),
+    condition = relevel(factor(condition), ref = "Unaffected Skin")
+  )
+
+skin_cell_abundance_results <- skin_abundance_complete |>
+  dplyr::group_by(Identity) |>
+  dplyr::group_modify(~ {
+    model <- stats::glm(
+      cbind(count, total_cells_all - count) ~ factor(id) + condition,
+      data = .x,
+      family = stats::binomial()
+    )
+
+    broom::tidy(model, conf.int = TRUE) |>
+      dplyr::filter(stringr::str_detect(term, "^condition"))
+  }) |>
+  dplyr::ungroup() |>
+  dplyr::mutate(
+    dplyr::across(
+      c(estimate, conf.low, conf.high),
+      ~ .x / log(10)
+    ),
+    `FDR < 0.05` = p.adjust(p.value, method = "BH") < 0.05,
+    residence = if_else(
+      Identity %in% c(
+        "B Cell", "Mac1", "NK Cells", "Mac2", "CD8", "Dividing",
+        "CLEC9A+ DCs", "CD4", "TCell1", "LAMP3+ DCs", "CD4 Naive",
+        "CLEC9A+ DCs - Replicating", "Tregs", "CD1C+ DCs",
+        "M1 Activated Macrophages"
+      ),
+      "Immune cells",
+      "Skin-resident cells"
+    ),
+    cell = dplyr::recode(
+      Identity,
+      "CD8" = "CD8 T Cell",
+      "Dividing" = "Dividing T Cell",
+      "CD4" = "CD4 T Cell",
+      "TCell1" = "T Cell1",
+      "CD4 Naive" = "CD4 T Cell Naive",
+      "vSMC" = "VSMC"
+    )
+  ) |>
+  dplyr::arrange(estimate) |>
+  dplyr::mutate(
+    cell = factor(cell, levels = unique(cell)),
+    residence = factor(
+      residence,
+      levels = c("Immune cells", "Skin-resident cells")
+    )
+  )
+
+figure_s12b_plot <- ggplot(
+  skin_cell_abundance_results,
+  aes(y = cell, x = estimate, xmin = conf.low, xmax = conf.high)
+) +
+  geom_linerange(
+    aes(colour = `FDR < 0.05`),
+    linewidth = 0.5,
+    alpha = 0.5
+  ) +
+  geom_point(
+    aes(colour = `FDR < 0.05`),
+    size = 1
+  ) +
+  geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.4) +
+  scale_colour_manual(
+    values = c(`FALSE` = "#F8766D", `TRUE` = "#00BFC4"),
+    name = "FDR",
+    breaks = c(FALSE, TRUE),
+    labels = c("> 0.05", "< 0.05")
+  ) +
+  scale_x_continuous(
+    breaks = c(-1.75, -1, 0, 1, 1.75),
+    sec.axis = sec_axis(
+      transform = ~ .,
+      breaks = c(-1.2, 0, 1.2),
+      labels = c(
+        "\u27f5 Enriched in normal skin",
+        "No change",
+        "Enriched in EM skin \u27f6"
+      )
+    )
+  ) +
+  coord_cartesian(xlim = c(-1.75, 1.75), clip = "on") +
+  facet_grid(
+    residence ~ .,
+    scales = "free_y",
+    space = "free_y",
+    switch = "y"
+  ) +
+  labs(x = expression(log[10](odds~ratio)), y = NULL) +
+  theme(
+    axis.text = element_text(size = 7),
+    axis.title.x = element_text(size = 7),
+    axis.text.x.top = element_text(size = 7),
+    strip.background = element_rect(fill = "grey85", colour = NA),
+    strip.text.y.left = element_text(angle = 90, size = 7),
+    legend.position = c(0.98, 0.05),
+    legend.justification = c(1, 0),
+    legend.background = element_rect(fill = NA, colour = NA),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.key.height = unit(4, "mm"),
+    legend.key.width = unit(8, "mm"),
+    panel.grid.minor = element_blank(),
+    panel.spacing.y = unit(0.12, "in"),
+    plot.margin = margin(2, 2, 2, 2)
+  )
+
+figure_s12b <- here::here(
+  "fig_s12_files",
+  "figure_S12b_fine_cell_abundance_forest_plot.png"
+)
+
+ragg::agg_png(
+  filename = figure_s12b,
+  width = 4.8,
+  height = 4.5,
+  units = "in",
+  res = 300
+)
+print(figure_s12b_plot)
+grDevices::dev.off() |> invisible()
+
+knitr::include_graphics(figure_s12b)
+```
+
+```{r session_info}
+sessionInfo()
+```

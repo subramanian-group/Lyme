@@ -1,5 +1,5 @@
 ---
-title: "Public Data Meta-analysis"
+title: "Figure 7"
 output:
   html_notebook: default
   html_document:
@@ -7,25 +7,51 @@ output:
   pdf_document: default
 editor_options: 
   chunk_output_type: console
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_knit$set(root.dir=normalizePath('../'))
 knitr::opts_knit$set(stop_on_error = 2L)
 knitr::opts_chunk$set(echo = F, warning = F, message=F, results='keep', fig.keep='all')
+
+dir.create(
+  here::here("fig_7_files"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
 ```
 
 ```{r optLibs, include=FALSE}
 # Options -----------------------------------------------------------------
 options(stringsAsFactors = FALSE)
 # Libraries ---------------------------------------------------------------
-pacman::p_load(limma,knitr,venn,RColorBrewer,ggplot2,ggplotify,patchwork,Hmisc,ggpubr,pheatmap,tidyr,tibble,dplyr,ggprism)
+pacman::p_load(limma,knitr,venn,RColorBrewer,ggplot2,ggplotify,patchwork,Hmisc,ggpubr,pheatmap,tidyr,tibble,dplyr,ggprism,Seurat, tidyverse)
 # devtools::install_github('dviraran/xCell')
 library(xCell)
+
+umap_min_text_size <- 8
+umap_geom_text_size <- umap_min_text_size / ggplot2::.pt
+
+update_geom_defaults("text", list(size = umap_geom_text_size, family = "Arial"))
+
+umap_arial_text_min_8 <- theme(
+  text = element_text(family = "Arial", size = umap_min_text_size),
+  axis.text = element_text(family = "Arial", size = umap_min_text_size),
+  axis.title = element_text(family = "Arial", size = umap_min_text_size),
+  strip.text = element_text(family = "Arial", size = umap_min_text_size),
+  legend.text = element_text(family = "Arial", size = umap_min_text_size),
+  legend.title = element_text(family = "Arial", size = umap_min_text_size),
+  plot.title = element_text(family = "Arial", size = umap_min_text_size)
+)
 ```
 
 ```{r scriptsFunction, include = F}
-# source("./R/General Functions.R")
+# source(here::here("scripts", "common", "general_functions.R"))
 
 cos_sim = function(x,y){
   out = apply(x,2,function(a){
@@ -192,13 +218,77 @@ findVarableFeats = function(x,n=2000,med_cut = .5,mad_cut = .5){
 
 # 7a
 
+### Panel A: Skin scRNA-seq UMAP by Lesion Status
 ```{r}
-knitr::include_graphics(c("Heatmap_Lyme_V4.tiff", "Heatmap_Lyme_V2.tiff"))
+load(here::here("data", "processed", "03_public_skin_rna", "combined3.RData"))
+labs = labels$Manual
+names(labs) = labels$cluster
+combined <- RenameIdents(combined, labs)
+combined$Identity = Idents(combined)
+
+#Sub-population Summary Plots
+DefaultAssay(combined) = 'integrated'
+
+combined@meta.data <- combined@meta.data |>
+  mutate(
+    source = str_extract(source_name_ch1, "(?<=\\d\\s)\\w.+"),
+    source = if_else(source == "Unaffected Lesion", "Unaffected Skin", source)
+  )
+
+set.seed(111)
+
+source_cells <- combined@meta.data |>
+  tibble::rownames_to_column("cell") |>
+  filter(!is.na(source))
+
+source_target_n <- source_cells |>
+  count(source) |>
+  pull(n) |>
+  min()
+
+source_cells_balanced <- source_cells |>
+  group_by(source) |>
+  slice_sample(n = source_target_n) |>
+  ungroup() |>
+  pull(cell)
+
+combined_balanced <- subset(combined, cells = source_cells_balanced)
+
+sc_skin_all.cells <- Seurat::DimPlot(
+    combined_balanced,
+    group.by = "Identity",   # cluster identities
+    split.by = "source",  # metadata column with "EM Lesion" vs "Unaffected Skin"
+    label = TRUE,
+    pt.size = 0.1,
+    label.size = umap_geom_text_size,
+    combine = FALSE
+)
+
+sc_skin_all.cells <- sc_skin_all.cells |>
+  purrr::map(
+    ~ .x +
+      umap_arial_text_min_8 +
+      coord_equal() +
+      theme(
+      legend.position = "none",
+      plot.title = element_blank()
+    )
+  ) |>
+  patchwork::wrap_plots()
+
+ ggsave(
+  here::here("fig_7_files", "figure_07a_skin_scrnaseq_umap_lesion_status.png"),
+  sc_skin_all.cells,
+  device = ragg::agg_png,
+  width = 3.6, height = 2.91,
+  units = "in", res = 300
+  )
 ```
 
 
 # 7b
 
+### Panel B: Skin Cell-Type Abundance Forest Plot
 ```{r abundance_skin_main}
 # loading the labelled data----
 
@@ -208,11 +298,11 @@ knitr::include_graphics(c("Heatmap_Lyme_V4.tiff", "Heatmap_Lyme_V2.tiff"))
 
 # rm(list = c("da", "daList"))
 
-# Saving the  relevant dataframes to a new file.
-# save(list=c("n_cells","abundanceFrame", "scAgg"),
-#      file = "scRNA_skin.RData")
-
-load(file = "scRNA_skin.RData")
+load(
+  file = here::here(
+    "data", "intermediate", "03_public_skin_rna", "ncells.RData"
+  )
+)
 
 n_cells <- n_cells |> 
   separate_wider_position(cols = 1, widths = c(Subject_ID = 6, 2, skin = 1)) |>
@@ -309,7 +399,7 @@ g2 <- ggplotGrob(
         )
                  )
 
-p <- results_skin_glm |> 
+forest_plot_skin_main <- results_skin_glm |> 
   ggplot(aes(y=cell, x=estimate, xmin=conf.low, xmax=conf.high)) +
   geom_linerange(color = "#00BFC4", size = 3, alpha = 0.3) +
   geom_point(shape = 20, color = "#00BFC4", size = 2) +
@@ -335,22 +425,23 @@ p <- results_skin_glm |>
   annotation_custom(grob = g1, xmin = -2.39, ymin = 6.5, ymax = 10.5) +
   annotation_custom(grob = g2, xmin = -2.39, ymin = 0.5, ymax = 6.5) 
 
-pngfile <- fs::path("forest_plot_skin_main.png")
 
 ggsave(
-  pngfile,
-  p,
+  here::here("fig_7_files", "figure_07b_skin_cell_type_abundance_forest.png"),
+  forest_plot_skin_main,
   scaling = 2.5,
   width = 9,
   height = 8,
   device = ragg::agg_png)
+
+forest_plot_skin_main
 ```
 
 # 7c
 
 ```{r data}
-load("data/combined3.RData")
-load("data/SubCluster_Labels.RData")
+load(here::here("data", "processed", "03_public_skin_rna", "combined3.RData"))
+load(here::here("data", "intermediate", "03_public_skin_rna", "SubCluster_Labels.RData"))
 labels = labels[match(rownames(combined@meta.data),labels$id),]
 combined@meta.data = data.frame(cbind(combined@meta.data,labels))
 
@@ -384,7 +475,15 @@ combined@meta.data |>
   dplyr::count(sub_cluster) |> # counting which ones repeat after mapping
   arrange(desc(n))
 
-base::setdiff(ls(), "combined") |> rm(list = _) 
+rm(list = base::intersect(
+  c(
+    "labs", "source_cells", "source_target_n", "source_cells_balanced",
+    "combined_balanced", "sc_skin_all.cells", "n_cells", "cell_type",
+    "data_skin_binary", "results_skin_glm", "g1", "g2",
+    "forest_plot_skin_main", "labels", "clean_meta"
+  ),
+  ls()
+))
 ```
 
 ```{r pseudobulk}
@@ -425,7 +524,10 @@ cts.split.modified <- lapply(cts.split, function(x){
   rownames(x) <- str_match(rownames(x), "(?<=_).+")
   t(x)})
 
-rm(list = base::setdiff(ls(), c("cts.split.modified", "combined")))
+rm(list = base::intersect(
+  c("alternative_labels", "cts", "cts.t", "splitRows", "cts.split"),
+  ls()
+))
 ```
 
 ```{r de}
@@ -481,16 +583,24 @@ countData_list <- countData_list[sample_n$cell]
 de_skin <- map2(sample_n$cell, sample_n$paired, ~ {
 # Check if paired
   if (.y == TRUE) {
-    DESeqDataSetFromMatrix(countData = countData_list[[.x]],
-                           colData = colData_list[[.x]],
-                           design = ~ as.factor(id) +
-                             (condition |> as.factor() |> relevel(ref = "Unaffected Skin"))
-                                       ) |> DESeq() |> results() |> as.data.frame() |> rownames_to_column()
+    DESeq2::DESeqDataSetFromMatrix(countData = countData_list[[.x]],
+                                  colData = colData_list[[.x]],
+                                  design = ~ as.factor(id) +
+                                    (condition |> as.factor() |> relevel(ref = "Unaffected Skin"))
+                                              ) |>
+      DESeq2::DESeq() |>
+      DESeq2::results() |>
+      as.data.frame() |>
+      rownames_to_column()
     } else {
-    DESeqDataSetFromMatrix(countData = countData_list[[.x]],
-                           colData = colData_list[[.x]],
-                           design = ~ (condition |> as.factor() |> relevel(ref = "Unaffected Skin"))
-                           ) |> DESeq() |> results() |> as.data.frame() |> rownames_to_column()
+    DESeq2::DESeqDataSetFromMatrix(countData = countData_list[[.x]],
+                                  colData = colData_list[[.x]],
+                                  design = ~ (condition |> as.factor() |> relevel(ref = "Unaffected Skin"))
+                                  ) |>
+      DESeq2::DESeq() |>
+      DESeq2::results() |>
+      as.data.frame() |>
+      rownames_to_column()
       }
 }) 
 
@@ -581,6 +691,7 @@ de_skin2 <- de_skin2 |>
   mutate(cell = fct_reorder(cell, subcluster_class_level))
 ```
 
+### Panel C: Differential Marker Heatmap Across Skin Subclusters
 ```{r heatmap_table}
 de_skin2 <- de_skin2 %>%
   # filter(
@@ -677,7 +788,7 @@ heatmap_table <- ggplot(
   annotation_custom(grob = g2, ymin = -2.5, xmin = 7.5, xmax = 14.5) +
   theme(panel.grid = element_line(color = "gray85", size = 0.1, linetype = 1))
 
-  pngfile <- fs::path("heatmap_table.png")
+pngfile <- here::here("fig_7_files", "figure_07c_skin_scrnaseq_marker_heatmap.png")
 
  ggsave(
   pngfile,
@@ -687,6 +798,8 @@ heatmap_table <- ggplot(
   width = 1.2,
   scaling = 0.39,
   device = ragg::agg_png)
+
+heatmap_table
 ```
 
 # 7d
@@ -719,6 +832,7 @@ kegg_modules <- tibble::tribble(
 
 ```
 
+### Exploratory KEGG Enzyme Differential Expression Volcano Plot
 ```{r enzymes_in_KEGG_2}
 kegg_modules <- kegg_modules |> left_join(
   by = "pathway_module_id",
@@ -776,38 +890,6 @@ de_enzymes_skin2 <- de_enzymes_skin |> left_join(enzyme_genes) |> left_join(kegg
     adjusted_p_value = padj
   )
 
-class(de_enzymes_skin2$kegg_module) <- "hyperlink"
-class(de_enzymes_skin2$kegg_orthology) <- "hyperlink"
-class(de_enzymes_skin2$kegg_reaction) <- "hyperlink"
-
-# Create a new workbook
-skin_scRNA <- createWorkbook()
-
-# Add a sheet
-addWorksheet(skin_scRNA, "de_enzymes")
-
-# Write data
-writeData(skin_scRNA, "de_enzymes", de_enzymes_skin2)
-
-# replace "labels" of hyperlink columns 
-writeData(skin_scRNA, sheet = 1, 
-          x = de_enzymes_skin2$kegg_module |> str_match("\\w*$") |> 
-            as.data.frame() |> dplyr::rename(kegg_module = V1), 
-          startRow = 1, startCol = 11)
-
-writeData(skin_scRNA, sheet = 1, 
-          x = de_enzymes_skin2$kegg_orthology |> str_match("\\w*$") |> 
-            as.data.frame() |> dplyr::rename(kegg_orthology = V1), 
-          startRow = 1, startCol = 12)
-
-writeData(skin_scRNA, sheet = 1, 
-          x = de_enzymes_skin2$kegg_reaction |> str_match("\\w*$") |>
-          as.data.frame() |> dplyr::rename(kegg_reaction = V1), 
-          startRow = 1, startCol = 13)
-
-# Save workbook
-saveWorkbook(skin_scRNA, "skin_scRNA.xlsx", overwrite = TRUE)
-
 volcano_de_enzymes_skin <- de_enzymes_skin2 |> drop_na() |> filter(category_3A %in% c("Sphingolipid", "Energy", "Tryptophan")) |> 
   ggplot(aes(x = log2_fold_change, y = -log10(p_value), color = (adjusted_p_value < 0.05), shape = subcluster_class)) + 
   geom_point() + 
@@ -843,7 +925,7 @@ volcano_de_enzymes_skin <- de_enzymes_skin2 |> drop_na() |> filter(category_3A %
     legend.margin = margin(0,0,0,0)
   ) + facet_wrap(. ~ category_3A) 
 
-pngfile <- fs::path("volcano_plot.png")
+pngfile <- here::here("fig_7_files", "figure_07_exploratory_kegg_enzyme_volcano.png")
 
  ggsave(
   pngfile,
@@ -853,12 +935,22 @@ pngfile <- fs::path("volcano_plot.png")
   units = "in", res = 300,
   scaling = 0.9
   )
+
+volcano_de_enzymes_skin
 ```
 
+### Panel D: KEGG Enzyme Differential Expression Heatmap
 ```{r heatmap_table_enzymes}
 # heatmap table of enzymes genes that are DE in skin
 
-de_enzymes_skin3 <- de_enzymes_skin2 |> dplyr::filter(
+de_enzymes_skin3 <- de_enzymes_skin2 |>
+  # Preserve the original DESeq-style names used by the heatmap code below.
+  mutate(
+    padj = adjusted_p_value,
+    gene = gene_name,
+    log2FoldChange = log2_fold_change
+  ) |>
+  dplyr::filter(
   padj <= 0.05,
   str_detect(cell, regex("unkn", ignore_case = TRUE), negate = TRUE),
   )
@@ -1002,7 +1094,7 @@ heatmap_table_enzyme <- ggplot(
   annotation_custom(grob = g1, ymin = -2.2, xmin = -0.2, xmax = 4.2) +
   annotation_custom(grob = g2, ymin = -2.2, xmin = 3.75, xmax = 7.25)
   
-  pngfile <- fs::path("heatmap_table_enzyme.png")
+pngfile <- here::here("fig_7_files", "figure_07d_skin_kegg_enzyme_heatmap.png")
 
  ggsave(
   pngfile,
@@ -1012,6 +1104,8 @@ heatmap_table_enzyme <- ggplot(
   width = 1.8,
   scaling = 0.39,
   device = ragg::agg_png)
+
+heatmap_table_enzyme
 ```
 
 
@@ -1022,7 +1116,7 @@ heatmap_table_enzyme <- ggplot(
 # load("./Data/Prospective/Processed/olink_results2.RData")
 # load("./Data/GEO/Public Data Limma.RData")
 
-load("Public Data Limma.RData")
+load(here::here("data", "intermediate", "03_public_skin_rna", "Public Data Limma.RData"))
 
 names = rownames(publicData$GSE84479$data)
 namesFixed = fixNames(names)
@@ -1371,6 +1465,7 @@ plot_boxes = function(genes,save,adjust=F,sig_only=F){
 }
 ```
 
+### Panel E: Public Skin IFN Signature Boxplot
 ```{r}
 sort(grep("GDF",fixNames(rownames(publicData$GSE154916$data)),value = T))
 sort(grep("APLP",fixNames(publicData$GSE63085$features$gene_symbol),value = T))
@@ -1393,5 +1488,10 @@ plot_boxes(c("IDO1"),adjust=T)
 # plot_boxes(c("NOS3","PTEN","NOX2"),adjust = T) #S1P
 # plot_boxes(c("CYP1A2","CYP2E1")) #Caffine
 # plot_boxes(c("BDH1","SLC16A6","HMGCL"),save = "figures_final/Metabalon/BoxPlot_Ketones.png",adjust=T) #Ketones
+```
+
+
+```{r session_info}
+sessionInfo()
 ```
 

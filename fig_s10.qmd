@@ -1,0 +1,253 @@
+---
+title: "Supplementary Figure 10"
+editor_options:
+  chunk_output_type: console
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+---
+
+```{r libraries}
+#| echo: false
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  ggpubr,
+  SummarizedExperiment,
+  here,
+  ragg
+)
+```
+
+### Figure S10: Flow Gating Scatter Plot Montage
+
+```{r flow_gating_preflight}
+#| echo: false
+
+flow_outlier_dir <- here::here("data", "Flow", "outlier flow subsets")
+required_flow_files <- file.path(
+  flow_outlier_dir,
+  c("monocyte_outliers2.RData", "tcell_outliers2.RData")
+)
+has_flow_outliers2 <- all(file.exists(required_flow_files))
+
+fig_s10_output_dir <- here::here("fig_s10_files")
+dir.create(fig_s10_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+if (!has_flow_outliers2) {
+  cat("Skipping Figure S10: optional Flow outlier subsets are not installed.\n")
+}
+```
+
+```{r flow_gating_figure_s10, eval=has_flow_outliers2}
+load(file.path(flow_outlier_dir, "monocyte_outliers2.RData"))
+monocyte_outliers2 <- mono
+rm(mono)
+
+load(file.path(flow_outlier_dir, "tcell_outliers2.RData"))
+tcell_outliers2 <- tcell
+rm(tcell)
+
+sample_labels_s10 <- c(
+  "101524 T1" = "12 EM\n101524 T1",
+  "101803 T1" = "27 EM\n101803 T1",
+  "103337 T1" = "2 EM\n103337 T1",
+  "111337 T1" = "Control\n111337 T1",
+  "201455 T1" = "35 EM\n201455 T1",
+  "201455 T2" = "35 EM\n201455 T2"
+)
+
+gate_plot <- function(
+  sce,
+  x,
+  y,
+  xmin,
+  xmax,
+  ymin,
+  ymax,
+  ids,
+  assay = "counts",
+  orient = "center",
+  nudge_x = 0.05,
+  nudge_y = 0.05
+) {
+  keep <- sce$sample_id %in% ids
+  plot_data <- data.frame(
+    t(SummarizedExperiment::assay(sce, assay))[keep, c(x, y)],
+    id = sce$sample_id[keep],
+    check.names = FALSE
+  )
+
+  gate_percent <- split(plot_data, factor(plot_data$id)) |>
+    lapply(function(sample_data) {
+      mean(
+        sample_data[[x]] > xmin & sample_data[[x]] < xmax &
+          sample_data[[y]] > ymin & sample_data[[y]] < ymax
+      ) * 100
+    })
+
+  x_range <- c(xmin, xmax)
+  y_range <- c(ymin, ymax)
+
+  label_position <- switch(
+    orient,
+    center = c(mean(x_range), mean(y_range)),
+    topleft = c(
+      x_range[1] + nudge_x * diff(x_range),
+      y_range[2] - nudge_y * diff(y_range)
+    ),
+    topright = c(
+      x_range[2] - nudge_x * diff(x_range),
+      y_range[2] - nudge_y * diff(y_range)
+    ),
+    bottomleft = c(
+      x_range[1] + nudge_x * diff(x_range),
+      y_range[1] + nudge_y * diff(y_range)
+    ),
+    bottomright = c(
+      x_range[2] - nudge_x * diff(x_range),
+      y_range[1] + nudge_y * diff(y_range)
+    )
+  )
+
+  gate_labels <- tibble::tibble(
+    id = names(gate_percent),
+    percent = paste0(sprintf("%.2f", as.numeric(gate_percent)), "%"),
+    label_x = label_position[1],
+    label_y = label_position[2]
+  )
+
+  gate_rectangles <- tibble::tibble(
+    id = ids,
+    xmin = xmin,
+    xmax = xmax,
+    ymin = ymin,
+    ymax = ymax
+  )
+
+  ggplot(plot_data, aes(x = .data[[x]], y = .data[[y]])) +
+    geom_point(size = 0.15) +
+    stat_density_2d(
+      aes(fill = after_stat(level)),
+      geom = "polygon",
+      contour_var = "ndensity",
+      alpha = 0.25
+    ) +
+    geom_rect(
+      data = gate_rectangles,
+      aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      inherit.aes = FALSE,
+      fill = NA,
+      colour = "black",
+      linewidth = 0.3
+    ) +
+    geom_label(
+      data = gate_labels,
+      aes(x = label_x, y = label_y, label = percent),
+      inherit.aes = FALSE,
+      size = 6 / 2.845276,
+      label.padding = unit(0.08, "lines"),
+      linewidth = 0.2
+    ) +
+    facet_wrap(
+      vars(id),
+      nrow = 1,
+      labeller = labeller(id = as_labeller(sample_labels_s10))
+    ) +
+    scale_fill_viridis_c(option = "C") +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.10))) +
+    theme_minimal(base_size = 8) +
+    theme(
+      legend.key.size = unit(4, "mm"),
+      axis.title = element_text(size = 6),
+      axis.text = element_text(size = 6),
+      strip.text.x = element_text(size = 7, lineheight = 0.9)
+    )
+}
+
+sample_ids <- names(sample_labels_s10)
+
+monocyte_plot <- gate_plot(
+  monocyte_outliers2,
+  x = "CD16",
+  y = "CD14",
+  xmin = 3,
+  xmax = 7.2,
+  ymin = 3.5,
+  ymax = 6.9,
+  ids = sample_ids,
+  orient = "topleft",
+  nudge_x = 0.25,
+  nudge_y = 0.15
+)
+
+tcell_plot <- gate_plot(
+  tcell_outliers2,
+  x = "CD4",
+  y = "CD8",
+  xmin = 0,
+  xmax = 2,
+  ymin = -1.5,
+  ymax = 0.8,
+  ids = sample_ids,
+  orient = "topright",
+  nudge_x = -0.25,
+  nudge_y = -0.12
+)
+
+cd4_cd8 <- data.frame(
+  t(SummarizedExperiment::assay(tcell_outliers2, "counts"))[, c("CD4", "CD8")]
+)
+effector_keep <-
+  cd4_cd8$CD4 > 0 & cd4_cd8$CD4 < 2 &
+  cd4_cd8$CD8 > -1.5 & cd4_cd8$CD8 < 1
+effector_tcells <- tcell_outliers2[, effector_keep]
+
+effector_plot <- gate_plot(
+  effector_tcells,
+  x = "CD45RO",
+  y = "CCR7",
+  xmin = -4.5,
+  xmax = -2,
+  ymin = -3,
+  ymax = -0.5,
+  ids = sample_ids,
+  orient = "topleft",
+  nudge_x = 0.25,
+  nudge_y = 0.12
+)
+
+figure_s10 <- ggpubr::ggarrange(
+  monocyte_plot,
+  tcell_plot,
+  effector_plot,
+  nrow = 3,
+  common.legend = TRUE,
+  legend = "right"
+)
+
+figure_s10_file <- file.path(
+  fig_s10_output_dir,
+  "figure_S10_flow_gating_scatter_plot_montage.png"
+)
+
+ragg::agg_png(
+  filename = figure_s10_file,
+  width = 8,
+  height = 6,
+  units = "in",
+  res = 300
+)
+print(figure_s10)
+grDevices::dev.off() |> invisible()
+
+knitr::include_graphics(figure_s10_file)
+```
+
+```{r session_info}
+sessionInfo()
+```

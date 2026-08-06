@@ -2,42 +2,77 @@
 title: "Figure 5"
 editor_options: 
   chunk_output_type: console
-format:
-  html:
-    warning: false     
-    message: false
-    cache: true
-    error: true
-    echo: true        
-    code-fold: true
-    code-tools: true
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
 ---
 
-```{r setup, echo=FALSE}
-knitr::opts_chunk$set(
-  library(tidyverse),
-  library(patchwork),
-  library(limma),
-  library(ComplexHeatmap),
-  library(clusterProfiler),
-  library(Hmisc),
-  library(ggraph),
-  library(mice),
-  library(ggpubr)
+```{r libraries, echo=FALSE}
+library(tidyverse)
+library(patchwork)
+library(Seurat)
+```
+
+```{r setup}
+#| echo: false
+
+# Set a global theme and base size
+theme_set(
+  theme_minimal()
 )
+
+umap_min_text_size <- 8
+umap_geom_text_size <- umap_min_text_size / ggplot2::.pt
+
+update_geom_defaults("text", list(size = umap_geom_text_size, family = "Arial"))
+
+umap_arial_text_min_8 <- theme(
+  text = element_text(family = "Arial", size = 8),
+  axis.text = element_text(family = "Arial", size = 8),
+  axis.title = element_text(family = "Arial", size = 8),
+  strip.text = element_text(family = "Arial", size = 8),
+  legend.text = element_text(family = "Arial", size = 8),
+  legend.title = element_text(family = "Arial", size = 8),
+  plot.title = element_text(family = "Arial", size = 8)
+)
+
+fig_5_dir <- "fig_5_files"
+dir.create(fig_5_dir, showWarnings = FALSE, recursive = TRUE)
+
+figure5_pbmc_dir <- here::here("data", "processed", "02_internal_pbmc_scrna")
+figure5_pbmc_intermediate_dir <- here::here("data", "intermediate", "02_internal_pbmc_scrna")
+dir.create(figure5_pbmc_intermediate_dir, showWarnings = FALSE, recursive = TRUE)
+
+figure5_umap_object_path <- here::here(
+  "data", "processed", "02_internal_pbmc_scrna",
+  "seurat.integrated2_monaco_umap_res0.9.rds"
+)
+figure5_pseudobulk_counts_path <- here::here(
+  "data", "intermediate", "02_internal_pbmc_scrna",
+  "figure5_pseudobulk_counts_by_cell_type_sample.rds"
+)
+figure5_de_time_path <- here::here(
+  "data", "processed", "02_internal_pbmc_scrna",
+  "figure5_time_de_by_cell_type.rds"
+)
+
 ```
 
 ```{r}
-load("Data/All/Data.RData")
+load(here::here("data", "processed", "01_proteomics_metabolomics", "Data.RData"))
 ```
 
 # Flow
 
 ```{r}
-load("results/Flow/Gating Results/bcell.RData")
-load("results/Flow/Gating Results/tcell.RData")
-load("results/Flow/Gating Results/monocyte.RData")
-load("results/Flow/Gating Results/dcnk.RData")
+load(here::here("data", "intermediate", "flow_gating", "bcell.RData"))
+load(here::here("data", "intermediate", "flow_gating", "tcell.RData"))
+load(here::here("data", "intermediate", "flow_gating", "monocyte.RData"))
+load(here::here("data", "intermediate", "flow_gating", "dcnk.RData"))
+
 flow = list()
 flow$panelResults = list(bcell=bcell,dcnk=dcnk,monocyte=monocyte,tcell=tcell)
 rm(bcell,dcnk,monocyte,tcell)
@@ -55,8 +90,14 @@ flow$ncells = flow$ncells[has_sample_data,]
 flow$total_cells = flow$total_cells[has_sample_data,]
 
 
-flow$data = lapply(data[names(unlist(sapply(data,nrow)))[unlist(sapply(data,nrow))==332]],function(x){
-  x[gsub("_.*","",rownames(flow$propsWide)),]
+flow_sample_ids <- gsub("_.*", "", rownames(flow$propsWide))
+sample_aligned_names <- names(data)[vapply(data, function(x) {
+  (is.data.frame(x) || is.matrix(x)) &&
+    !is.null(rownames(x)) &&
+    all(flow_sample_ids %in% rownames(x))
+}, logical(1))]
+flow$data = lapply(data[sample_aligned_names],function(x){
+  x[flow_sample_ids,,drop = FALSE]
 })
 
 flow$panel = gsub("\\..*","",rownames(flow$propsLong))[match(colnames(flow$propsWide),flow$propsLong$cluster)]
@@ -74,693 +115,497 @@ flow$propsLong$cluster = gsub("yd","gd",flow$propsLong$cluster)
 ```
 
 # 5a
+### PCA patients and controls all timepoints
+
+### Panel A: Flow Cytometry PCA Across Cohorts
+```{r}
+# sams = flow$data$sampleData$Condition=="Patient"&
+#   flow$data$sampleData$days_of_prior_antibiotics==0
+
+## one joint PCA, then facet
+sd <- flow$data$sampleData
+
+keep <- sd$days_of_prior_antibiotics == 0 &
+  sd$Condition %in% c("Patient","Control") &
+  !grepl("35", sd$Site_s_of_EM)
+
+d <- flow$propsWide[, !grepl("Dump|Debris|DP |DN |- DN|- DP|UNKN|IL1B", colnames(flow$propsWide))]
+d <- apply(d, 2, function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
+
+keep <- keep & apply(d, 1, function(x) sum(is.na(x)) < 12) & !grepl("_1", rownames(d))
+d <- d[keep, , drop = FALSE]
+
+## impute once
+d2 <- d
+colnames(d2) <- make.names(colnames(d2))
+m <- mice::mice(d2, 1, seed = 123, printFlag = FALSE)
+d_imp <- mice::complete(m, 1)
+colnames(d_imp) <- colnames(d)
+
+## PCA once
+pca <- prcomp(d_imp, scale. = FALSE)
+
+vars <- paste0(
+  "PC", 1:ncol(pca$x),
+  " (", round(pca$sdev^2 / sum(pca$sdev^2) * 100, 1), "%)"
+)
+
+## build plotting df (no dplyr needed)
+df <- data.frame(sample_id = rownames(pca$x), pca$x, stringsAsFactors = FALSE)
+df$id <- sub(" .*", "", df$sample_id)
+df$Condition <- sd[df$sample_id, "Condition"]
+df$time <- sd[df$sample_id, "time"]
+df$dataset <- ifelse(df$Condition == "Patient", "Patients", "Controls")
+
+## optional: mix id levels so hues do not clump by facet
+set.seed(1)
+df$id <- factor(df$id, levels = sample(sort(unique(df$id))))
+
+fig_5a <- ggplot(df, aes(PC1, PC2, color = id, shape = time)) +
+  geom_point(size = 8, alpha = 0.5) +
+  facet_wrap(~dataset) +
+  scale_color_discrete(guide = "none") +
+  scale_shape_manual(values = c("T1" = 15, "T2" = 16, "T3" = 17, "T4" = 18)) +
+  xlab(vars[1]) + ylab(vars[2]) +
+  theme_minimal(base_size = 50)
+
+
+ggsave(
+      plot = fig_5a,
+      filename = file.path(fig_5_dir, "figure_05a_flow_cytometry_pca.png"),
+      device = ragg::agg_png,
+      width = 18,
+      height = 9,
+      units = "in",
+      dpi = 600
+    )
+
+fig_5a
+
+
+```
+
+
+# 5b
 #### Selected Boxplots
 
+### Panel B: Plasmablast Abundance Over Time
 ```{r}
 pop = 'B Cell - Plasmablasts'
-sams = (flow$data$sampleData$days_of_prior_antibiotics==0&flow$data$sampleData$Condition=="Patient")
+sample_ids_5b <- rownames(flow$data$sampleData)
+sams = (
+  flow$data$sampleData$days_of_prior_antibiotics == 0 &
+    flow$data$sampleData$Condition == "Patient" &
+    as.character(flow$data$sampleData$Subject_ID) != "201455" &
+    !sample_ids_5b %in% c("201455 T1", "201455 T2")
+)
 sd = flow$data$sampleData[sams,]
 dat = data.frame(flow$propsWide[sams,pop],sd)
 colnames(dat)[1] = pop
 dat$time_numeric = as.numeric(gsub("^T(.)","\\1",dat$time))
 
-p=ggplot(dat,aes(x=time,y=`B Cell - Plasmablasts`))+
-  geom_boxplot(outlier.shape = NA)+
-  geom_point(alpha=.25,size=3)+
-  geom_line(aes(group=Subject_ID),alpha=.25)+
-  theme_minimal(base_size = 30)+
+fig_5b <- ggplot(dat,aes(x=time,y=`B Cell - Plasmablasts`))+
+  geom_boxplot(outlier.shape = NA, size = 0.1)+
+  geom_point(alpha=0.25,size=0.5)+
+  geom_line(aes(group=Subject_ID),alpha=0.3, size = 0.1)+
+  theme_minimal(base_size = 8)+
   ggtitle("Plasmablasts")+
   xlab("")+ylab("Proportion of B Cells")
-p
-# png("figures_final/Flow/Plasmablast Boxplots.png",width=300*2,height=200*2)
-# p
-# dev.off()
+fig_5b
+ggsave(
+  file.path(fig_5_dir, "figure_05b_paired_plasmablast_abundance.png"),
+  fig_5b,
+  device = ragg::agg_png,
+  width = 2.25,
+  height = 1.5,
+  units = "in",
+  dpi = 300
+)
 ```
-
-# 5b
-### PCA patients and controls all timepoints
-
-```{r}
-sams = flow$data$sampleData$Condition=="Patient"&
-  flow$data$sampleData$days_of_prior_antibiotics==0
-
-
-d = flow$propsWide[,!grepl("Dump|Debris|DP |DN |- DN|- DP|UNKN|IL1B",colnames(flow$propsWide))]
-d = apply(d,2,function(x)(x-mean(x,na.rm=T))/sd(x,na.rm=T))
-sams = sams&apply(d,1,function(x)sum(is.na(x))<12)&!grepl("_1",rownames(d))
-d = d[sams,]
-# d[is.na(d)] = 0
-d2 = d
-colnames(d2) = make.names(colnames(d2))
-set.seed(123)
-m = mice(d2,1,seed = 123)
-d2 = complete(m,1)
-colnames(d2) = colnames(d)
-d = d2
-rm(d2)
-
-pca = prcomp(d,scale. = F)
-
-d2_p = data.frame(cbind(names = rownames(pca$x),
-                        id = gsub(" .*","",rownames(pca$x)),
-                        condition = flow$data$sampleData[rownames(pca$x),"Condition"],
-                        pca$x,flow$propsWide[rownames(pca$x),],
-                        flow$data$directSymptoms[rownames(pca$x),],
-                        flow$data$emData[rownames(pca$x),]))
-d2_p$label = rownames(pca$x)
-# d2$label[!d2$label%in%c("104728 T1","201455 T1","204185 T1")] = ""
-vars_p = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
-
-
-sams = flow$data$sampleData$Condition=="Control"
-d = flow$propsWide[,!grepl("Dump|Debris|DP |DN |- DN|- DP|UNKN|IL1B",colnames(flow$propsWide))]
-d = apply(d,2,function(x)(x-mean(x,na.rm=T))/sd(x,na.rm=T))
-sams = sams&apply(d,1,function(x)sum(is.na(x))<12)&!grepl("_1",rownames(d))
-d = d[sams,]
-# d[is.na(d)] = 0
-d2 = d
-colnames(d2) = make.names(colnames(d2))
-set.seed(123)
-m = mice(d2,1,seed = 123)
-d2 = complete(m,1)
-colnames(d2) = colnames(d)
-d = d2
-rm(d2)
-
-pca = prcomp(d,scale. = F)
-
-d2_c = data.frame(cbind(names = rownames(pca$x),
-                        id = gsub(" .*","",rownames(pca$x)),
-                        condition = flow$data$sampleData[rownames(pca$x),"Condition"],
-                        pca$x,flow$propsWide[rownames(pca$x),],
-                        flow$data$directSymptoms[rownames(pca$x),],
-                        flow$data$emData[rownames(pca$x),]))
-d2_c$label = rownames(pca$x)
-# d2$label[!d2$label%in%c("104728 T1","201455 T1","204185 T1")] = ""
-vars_c = paste0("PC",1:ncol(pca$x)," (",round(pca$sdev^2/sum(pca$sdev^2)*100,1),"%)")
-
-legendSize = unit(5,'mm')
-
-d2_p <- d2_p %>%
-  rownames_to_column("sample_id") %>%
-  left_join(flow$data$sampleData %>%
-              rownames_to_column("sample_id") %>%
-              select(sample_id, time),
-            by = "sample_id")
-
-d2_c <- d2_c %>%
-  rownames_to_column("sample_id") %>%
-  left_join(flow$data$sampleData %>%
-              rownames_to_column("sample_id") %>%
-              select(sample_id, time),
-            by = "sample_id")
-
-p1 = ggplot(d2_p,aes(x=PC1,y=PC2,label=label,color=sample_id, shape =time))+
-  # ggrepel::geom_label_repel(size=12,show.legend = F,max.overlaps = 50,force=3,max.time = 1)+
-  geom_point(size = 5, alpha = 0.5) +
-  scale_color_discrete(guide = "none") +  # hide legend for color
-  scale_shape_manual(values = c("T1" = 15, "T2" = 16, "T3" = 17, "T4" = 18)) + 
-  xlab(vars_p[1])+ylab(vars_p[2])+
-  theme(legend.key.size = legendSize,
-        axis.text = element_blank(),
-        plot.title = element_text(hjust = 0.5))+
-  theme_minimal(base_size = 50)+
-  ggtitle("Patients")
-p2 = ggplot(d2_c,aes(x=PC1,y=PC2,label=label,color=sample_id, shape =time))+
-  # ggrepel::geom_label_repel(size=12,show.legend = F,max.overlaps = 50,force=3,max.time = 1)+
-  geom_point(size = 5, alpha = 0.5) +
-  scale_color_discrete(guide = "none") +  # hide legend for color
-  scale_shape_manual(values = c("T1" = 15, "T2" = 16, "T3" = 17, "T4" = 18)) + 
-  xlab(vars_c[1])+ylab(vars_c[2])+
-  theme(legend.key.size = legendSize,
-        axis.text = element_blank(),
-        plot.title = element_text(hjust = 0.5))+
-  theme_minimal(base_size = 50)+
-  ggtitle("Controls")
-
-p = ggarrange(p1,p2,nrow=1)
-
-# png("./figures_final/Flow/Flow PCA All Timepoints Patients and Controls.png",width = 500*6,height = 425*3)
-p
-# dev.off()
-```
-
 
 # 5c
-# scRNAseq
-```{r clustering}
-seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+#### scRNAseq
+```{r load_scrna}
+res_0.9 <- readRDS(figure5_umap_object_path)
+DefaultAssay(res_0.9) <- "originalexp"
 
-# removing cells with fewer than 500 detected genes otherwise the FindNeighbors step fails because of matirx sparsity
-seurat.integrated2 <- subset(seurat.integrated, nFeature_originalexp > 500)
+figure5_cell_type_full_levels <- c(
+  "Progenitor cells",
+  "Classical monocytes",
+  "Intermediate monocytes",
+  "Non classical monocytes",
+  "Myeloid dendritic cells",
+  "Plasmacytoid dendritic cells",
+  "Natural killer cells",
+  "Naive B cells",
+  "Non-switched memory B cells",
+  "Switched memory B cells",
+  "Exhausted B cells",
+  "Plasmablasts",
+  "Naive CD4 T cells",
+  "T regulatory cells",
+  "Th1 cells",
+  "Th2 cells",
+  "Th17 cells",
+  "Follicular helper T cells",
+  "Th1/Th17 cells",
+  "Terminal effector CD4 T cells",
+  "Naive CD8 T cells",
+  "Effector memory CD8 T cells",
+  "Central memory CD8 T cells",
+  "Terminal effector CD8 T cells",
+  "MAIT cells",
+  "Non-Vd2 gd T cells",
+  "Vd2 gd T cells",
+  "Low-density basophils"
+)
 
-# removing the same cells from the labeling objects too
-# predictions_dice_m <- readRDS("~/lyme/output/reference sets/predictions_dice_m.rds")
-# 
-# rownames(predictions_dice_m) <- seurat.integrated |> colnames() # needed for next step
-# 
-# predictions_dice_m <- predictions_dice_m[
-#   rownames(predictions_dice_m) %in% colnames(seurat.integrated2), 
-#   ]
+figure5_cell_type_short_to_full <- c(
+  "Progenitor" = "Progenitor cells",
+  "Classical mono" = "Classical monocytes",
+  "Int mono" = "Intermediate monocytes",
+  "Non-class mono" = "Non classical monocytes",
+  "Myeloid DCs" = "Myeloid dendritic cells",
+  "pDCs" = "Plasmacytoid dendritic cells",
+  "NK cells" = "Natural killer cells",
+  "Naive B" = "Naive B cells",
+  "Non-switch mem B" = "Non-switched memory B cells",
+  "Switched mem B" = "Switched memory B cells",
+  "Exhausted B" = "Exhausted B cells",
+  "Plasmablasts" = "Plasmablasts",
+  "Naive CD4 T" = "Naive CD4 T cells",
+  "Treg" = "T regulatory cells",
+  "Th1" = "Th1 cells",
+  "Th2" = "Th2 cells",
+  "Th17" = "Th17 cells",
+  "Tfh" = "Follicular helper T cells",
+  "Th1/Th17" = "Th1/Th17 cells",
+  "Temra CD4 T" = "Terminal effector CD4 T cells",
+  "Naive CD8 T" = "Naive CD8 T cells",
+  "Tem CD8 T" = "Effector memory CD8 T cells",
+  "Tcm CD8 T" = "Central memory CD8 T cells",
+  "Temra CD8 T" = "Terminal effector CD8 T cells",
+  "MAIT" = "MAIT cells",
+  "Non-Vd2 gd T" = "Non-Vd2 gd T cells",
+  "Vd2 gd T" = "Vd2 gd T cells",
+  "LD basophils" = "Low-density basophils"
+)
 
-predictions_monaco_f <- readRDS("~/lyme/output/reference sets/predictions_monaco_f.rds")
+res_0.9@meta.data <- res_0.9@meta.data |>
+  mutate(
+    cell_type_fine_full = recode(
+      as.character(cell_type_fine),
+      !!!figure5_cell_type_short_to_full
+    ),
+    cell_type_fine_full = factor(
+      cell_type_fine_full,
+      levels = figure5_cell_type_full_levels
+    )
+  )
+```
 
-rownames(predictions_monaco_f) <- seurat.integrated |> colnames() # needed for next step
+### Panel 5C: PBMC UMAP by Condition and Time
 
-predictions_monaco_f <- predictions_monaco_f[
-  rownames(predictions_monaco_f) %in% colnames(seurat.integrated2), 
-  ]
+```{r fig_5c}
+fig_5c_cell_type_levels <- c(
+  "Classical mono",
+  "Exhausted B",
+  "Int mono",
+  "MAIT",
+  "Myeloid DCs",
+  "Naive B",
+  "Naive CD4 T",
+  "Naive CD8 T",
+  "NK cells",
+  "Non-class mono",
+  "Non-switch mem B",
+  "Non-Vd2 gd T",
+  "pDCs",
+  "Plasmablasts",
+  "Progenitor",
+  "Switched mem B",
+  "Tcm CD8 T",
+  "Tem CD8 T",
+  "Temra CD4 T",
+  "Temra CD8 T",
+  "Tfh",
+  "Th1",
+  "Th1/Th17",
+  "Th17",
+  "Th2",
+  "Treg",
+  "Vd2 gd T"
+)
 
-# add cell type annotations
-# seurat.integrated2@meta.data$cell_type_coarse <- predictions_monaco_m$labels
-seurat.integrated2@meta.data$cell_type_fine <- predictions_monaco_f$labels
+fig_5c_cell_type_colors <- scales::hue_pal()(length(fig_5c_cell_type_levels)) |>
+  setNames(fig_5c_cell_type_levels)
 
-rm(list = base::setdiff(ls(), c("seurat.integrated2", "predictions_monaco_f")))
+fig_5c_cell_type_color_labels <- sprintf(
+  "<span style='color:%s'>%s</span>",
+  fig_5c_cell_type_colors,
+  names(fig_5c_cell_type_colors)
+) |>
+  setNames(names(fig_5c_cell_type_colors))
+
+fig_5c_subset_cell_type_levels <- c(
+  "Non-switch mem B",
+  "Naive B",
+  "Naive CD8 T",
+  "Tfh",
+  "Th1",
+  "Naive CD4 T",
+  "Classical mono",
+  "Vd2 gd T",
+  "Th1/Th17",
+  "MAIT",
+  "Non-Vd2 gd T",
+  "Myeloid DCs"
+)
+
+fig_5c_legend_cell_type_levels <- sort(fig_5c_subset_cell_type_levels)
+
+condition_time_levels <- c(
+  "Control",
+  "Patient_T1",
+  "Patient_T4"
+)
+
+condition_time_labels <- str_replace_all(
+  condition_time_levels,
+  "_",
+  " "
+)
 
 set.seed(111)
 
-# Run the standard workflow for visualization and clustering
-seurat.integrated2 <- ScaleData(seurat.integrated2, verbose = FALSE)
-seurat.integrated2 <- RunPCA(seurat.integrated2, npcs = 30, verbose = FALSE)
-seurat.integrated2 <- RunUMAP(seurat.integrated2, reduction = "pca", dims = 1:30)
-seurat.integrated2 <- FindNeighbors(seurat.integrated2, dims = 1:30)
-# res_0.05 <- FindClusters(seurat.integrated2, resolution = 0.05) # 10 clusters
-res_0.9 <- FindClusters(seurat.integrated2, resolution = 0.9) # 27 clusters
-
-# Visualization
-# plot_unsupervised <- DimPlot(res_0.9, 
-#                 reduction = "umap", 
-#                 label = TRUE, 
-#                 label.box = TRUE,
-#                 repel = TRUE) + 
-#   theme(legend.position = "none") + 
-#   scale_colour_manual(
-#     values = c("#ac9437", "#6d37cb", "#63c329", "#d441d8", "#5bad44", "#8c61ee", "#b6b730", "#552a91", "#de8f26", "#5a77da", "#e14327", "#5f96cc", "#bd6131", "#b560d3", "#56a360", "#ce50b7", "#53a58d", "#c84593", "#918b49", "#856dbd", "#595632", "#b988c6", "#c04347", "#5e90a8", "#c7456c", "#553669", "#b7795d", "#a8677d")
-#     ) +
-#   ggtitle("Unsupervised clustering  of PBMCs from Lyme participants")
-
-# res_0.9@meta.data$cell_type_coarse <- predictions_dice_m$labels
-# res_0.9@meta.data$cell_type_fine <- predictions_dice_f$labels
-
-# res_0.9@meta.data$cell_type_coarse <- predictions_monaco_m$labels
-res_0.9@meta.data$cell_type_fine <- predictions_monaco_f$labels
-
-# plot_supervised_coarse <- DimPlot(res_0.9, 
-#                                   reduction = "umap",
-#                                   label = TRUE,
-#                                   label.box = TRUE,
-#                                   group.by = "cell_type_coarse",
-#                                   repel = TRUE) +
-#   theme(legend.position = "none") +
-#   scale_colour_manual(
-#     values = c("#ac9437", "#6d37cb", "#63c329", "#d441d8", "#5bad44", "#8c61ee", "#b6b730", "#552a91", "#de8f26", "#5a77da", "#e14327", "#5f96cc", "#bd6131", "#b560d3", "#56a360", "#ce50b7", "#53a58d", "#c84593", "#918b49", "#856dbd", "#595632", "#b988c6", "#c04347", "#5e90a8", "#c7456c", "#553669", "#b7795d", "#a8677d")
-#     ) +
-#   ggtitle("Supervised clustering — coarse")
-
-# plot_supervised_fine <- DimPlot(res_0.9, 
-#                                   reduction = "umap",
-#                                   # label = TRUE,
-#                                   # label.box = TRUE,
-#                                   group.by = "cell_type_fine",
-#                                   repel = TRUE) +
-#   theme(legend.position = "none") +
-#   scale_colour_manual(
-#     values = c("#ac9437", "#6d37cb", "#63c329", "#d441d8", "#5bad44", "#8c61ee", "#b6b730", "#552a91", "#de8f26", "#5a77da", "#e14327", "#5f96cc", "#bd6131", "#b560d3", "#56a360", "#ce50b7", "#53a58d", "#c84593", "#918b49", "#856dbd", "#595632", "#b988c6", "#c04347", "#5e90a8", "#c7456c", "#553669", "#b7795d", "#a8677d")
-#     ) +
-#   ggtitle("Supervised clustering — fine")
-
-# regenerating the fine clustering plot as a small-multiple chart
-
-# medians <- plot_supervised_fine |> layer_data(1) |>  
-#   base::cbind(res_0.9@meta.data$cell_type_fine) |> 
-#   dplyr::rename(cell_type_fine = 11) |> 
-#   filter(cell_type_fine != "Low-density basophils") |> group_by(cell_type_fine) |> 
-#     summarise(median_x = median(x), median_y = median(y)) |> 
-#   mutate(x_triptych = case_when(median_x <0 ~ "left",
-#                                 median_x > 0 & median_x < 5 ~ "middle",
-#                                 median_x > 5 ~ "right")
-#          )
-
-# reordering the levels by centroids
-# positions_manual <- c(medians |> filter(x_triptych == "left") |> arrange(desc(median_y)) |> pluck("cell_type_fine"),
-#       medians |> filter(x_triptych == "middle") |> arrange(desc(median_y)) |> pluck("cell_type_fine"),
-#       medians |> filter(x_triptych == "right") |> arrange(desc(median_y)) |> pluck("cell_type_fine"))
-
-# reordering the levels manually
-positions_manual <- c(
-      "Progenitor",
-      "Classical mono",
-      "Int mono",
-      "Non-class mono",
-      "Myeloid DCs",
-      "pDCs",
-      "NK cells",
-      "Naive B",
-      "Non-switch mem B",
-      "Switched mem B",
-      "Exhausted B",
-      "Plasmablasts",
-      "Naive CD4 T",
-      "Treg",
-      "Th1",
-      "Th2",
-      "Th17",
-      "Tfh",
-      "Th1/Th17",
-      "Temra CD4 T",
-      "Naive CD8 T",
-      "Tem CD8 T",
-      "Tcm CD8 T",
-      "Temra CD8 T",
-      "MAIT",
-      "Non-Vd2 gd T",
-      "Vd2 gd T",
-      "LD basophils"
-    )
-
-res_0.9@meta.data <- res_0.9@meta.data |> 
-   mutate(
-    cell_type_fine = case_match(cell_type_fine,
-      "Progenitor cells"                ~ "Progenitor",
-      "Classical monocytes"             ~ "Classical mono",
-      "Intermediate monocytes"          ~ "Int mono",
-      "Non classical monocytes"         ~ "Non-class mono",
-      "Myeloid dendritic cells"         ~ "Myeloid DCs",
-      "Plasmacytoid dendritic cells"    ~ "pDCs",
-      "Natural killer cells"            ~ "NK cells",
-      "Naive B cells"                   ~ "Naive B",
-      "Non-switched memory B cells"     ~ "Non-switch mem B",
-      "Switched memory B cells"         ~ "Switched mem B",
-      "Exhausted B cells"               ~ "Exhausted B",
-      "Plasmablasts"                    ~ "Plasmablasts",
-      "Naive CD4 T cells"               ~ "Naive CD4 T",
-      "T regulatory cells"              ~ "Treg",
-      "Th1 cells"                       ~ "Th1",
-      "Th2 cells"                       ~ "Th2",
-      "Th17 cells"                      ~ "Th17",
-      "Follicular helper T cells"       ~ "Tfh",
-      "Th1/Th17 cells"                  ~ "Th1/Th17",
-      "Terminal effector CD4 T cells"   ~ "Temra CD4 T",
-      "Naive CD8 T cells"               ~ "Naive CD8 T",
-      "Effector memory CD8 T cells"     ~ "Tem CD8 T",
-      "Central memory CD8 T cells"      ~ "Tcm CD8 T",
-      "Terminal effector CD8 T cells"   ~ "Temra CD8 T",
-      "MAIT cells"                      ~ "MAIT",
-      "Non-Vd2 gd T cells"              ~ "Non-Vd2 gd T",
-      "Vd2 gd T cells"                  ~ "Vd2 gd T",
-      "Low-density basophils"           ~ "LD basophils",
-      .default = NA_character_  # Optional: flag unmatched values as NA
-    )
-  ) 
-```
-
-```{r fine_multiple, eval=F}
-# fine multiple----
-
-fine_multiple <- plot_supervised_fine |> layer_data(1) |>  
-  base::cbind(res_0.9@meta.data$cell_type_fine) |> 
-  # dplyr::slice(1:1000) |>
-  dplyr::rename(cell_type_fine = last_col()) |> 
-  mutate(group = group |> as.factor(),
-         cell_type_fine = cell_type_fine |> as.factor() 
-         |> fct_relevel(positions_manual)
-         ) |>
-    filter(cell_type_fine != "LD basophils") |> 
-  ggplot(aes(x = y, y = x, color = cell_type_fine)) +
-  geom_point(size = 0.03767612, stroke = 0.5, shape = 19, color = "#e14327") + 
-  # scale_x_continuous(limits = c(-8.3, 8.3)) +
-  gghighlight(use_direct_label = F) + 
-  facet_wrap(~ cell_type_fine, ncol = 7) + 
-  ggthemes::theme_tufte() + 
-  xlab("UMAP 1 \u27f6") +
-  ylab(expression("UMAP 2 \u27f6")) +
-theme(
-  legend.position = "none",
-  strip.text = element_text(margin = margin(0, 0, 0, 0), size = 8) # Remove margin around strip text
-)
-
-# umap_plot <- rvg::dml(ggobj = fine_multiple)
-# 
-# read_pptx("template.pptx") |>
-# add_slide(layout = "Horizontal Layout", master = "Office Theme") |>
-# ph_with(value = umap_plot, location = ph_location_label(ph_label = "Chart")) |>
-# print(target = "umap_plot.pptx")
-
-ggsave("fine_multiple.png",
-height = 5,
-width = 7,
-units = "in",
-dpi = 600,
-device = "png",
-bg = "white"
-)
-```
-
-```{r unused, eval=F}
-# # overlaying participant IDs on clusters
-# plot_participant <- DimPlot(res_0.9, 
-#                         reduction = "umap",
-#                         # label = TRUE,
-#                         label.box = TRUE,
-#                         group.by = "sample",
-#                         repel = TRUE) +
-#   theme(legend.position = "bottom") +
-#   ggtitle("PBMCs from different Lyme participants") 
-
-# # splitting clusters by time points
-# plot_time <- DimPlot(res_0.9, 
-#               reduction = "umap", 
-#               label = TRUE, 
-#               label.box = TRUE,
-#               repel = TRUE, 
-#               split.by = "time") +   
-#   theme(legend.position = "none") + 
-#   ggtitle("PBMCs from Lyme participants at different time points")
-# 
-# # splitting clusters by infection
-# plot_infection <- DimPlot(res_0.9, 
-#               reduction = "umap", 
-#               label = TRUE, 
-#               label.box = TRUE,
-#               repel = TRUE, 
-#               split.by = "infection") +   
-#   theme(legend.position = "none") + 
-#   ggtitle("PBMCs in samples split by their Lyme infection status")
-```
-
-```{r Fig_5C}
-# PBMC UMAPs (Fig 5C)----
-
-Fig5C_df <- res_0.9@meta.data |> 
+Fig5C_df <- res_0.9@meta.data |>
   base::cbind(res_0.9@reductions$umap@cell.embeddings)
 
-table(Fig5C_df$Condition, Fig5C_df$patient)
-table(Fig5C_df$time, Fig5C_df$patient)
-table(Fig5C_df$time, Fig5C_df$Condition)
+Fig5C_df_subset <- Fig5C_df |>
+  filter(cell_type_fine %in% fig_5c_subset_cell_type_levels)
 
-```
+fig_5c_target_n <- Fig5C_df_subset |>
+  filter(sample %in% c("L211932_T1", "L214612_T1") | Condition == "Patient") |>
+  count(Condition, time) |>
+  pull(n) |>
+  min()
 
-```{r Control_Time_AllCells, eval=F}
-# Control_Time_AllCells----
+fig_5c_scaling_factors <- Fig5C_df_subset |>
+  filter(sample %in% c("L211932_T1", "L214612_T1") | Condition == "Patient") |>
+  count(Condition, time) |>
+  mutate(scaling_factor = fig_5c_target_n / n)
 
-# Create a new column that combines condition and patient
-Fig5C_df$condition_patient <- paste(Fig5C_df$Condition, Fig5C_df$patient, sep = "_")
-# If condition_patient has control, then change to control
-Fig5C_df$condition_patient <- str_replace(Fig5C_df$condition_patient, "Control.*", "Control")
-
-Fig5C_df$condition_time <- paste(Fig5C_df$Condition, Fig5C_df$time, sep = "_")
-Fig5C_df$condition_time <- str_replace(Fig5C_df$condition_time, "Control.*", "Control")
-
-# Drop Patient_205994 Patient_206002
-Fig5C_df <- Fig5C_df |> filter(condition_patient != "Patient_205994", condition_patient != "Patient_206002")
-
-
-Fig5C_df$condition_patient_time <- paste(Fig5C_df$Condition, Fig5C_df$patient, sep = "_")
-Fig5C_df$condition_patient_time <- paste(Fig5C_df$condition_patient_time, Fig5C_df$time, sep = "_")
-
-Fig5C_df$condition_patient_time <- str_replace(Fig5C_df$condition_patient_time, "Control.*", "Control")
-
-cond_time <- ggplot(Fig5C_df, aes(umap_2, umap_1, color = cell_type_fine)) +
-  geom_point(size = 0.03767612, stroke = 0.5, shape = 19) + 
-  #gghighlight(use_direct_label = F) + 
-  facet_wrap(~ condition_time) + 
-  ggthemes::theme_tufte() + 
-  xlab("UMAP 1") +
-  ylab(expression("UMAP 2")) +
-  guides(color = guide_legend(override.aes = list(size = 4), title = "Cell Type"))
-
-ggsave("Control_Time_AllCells.png",
-cond_time ,
-#height = 6.22,
-width = 12.22,
-units = "in",
-dpi = 320,
-device = "png", ,bg="white")
-
-cond_time
-```
-
-```{r Control_Time_Patient_AllCells, eval=F}
-# Time and patient----
-
-cond_time_pat <- Fig5C_df |> 
-  filter(Condition == "Patient" | sample == "L211932_T1" | sample == "L214612_T1") |> 
-  unite(col = "condition_patient_time", c(Condition, Subject_ID, time), remove = FALSE) |> 
-  mutate(condition_patient_time = condition_patient_time |> 
-           factor(levels =  
-                  c(
-                  "Control_214612_T1",
-                  "Patient_204127_T1",
-                  "Patient_204127_T4",
-                  "Control_211932_T1",
-                  "Patient_204185_T1",
-                  "Patient_204185_T4"
-                  )
-                  )
-                  ) |> 
-      filter(cell_type_fine != "LD basophils") |> 
-  ggplot(
-       aes(umap_2, umap_1, color = cell_type_fine)) +
-    geom_point(size = 0.3, stroke = 0, shape = 19) + 
-    #gghighlight(use_direct_label = F) + 
-    facet_wrap(~ condition_patient_time) + 
-    ggthemes::theme_tufte(base_size = 10) + 
-    xlab("UMAP 1") +
-    ylab("UMAP 2") +
-    guides(color = guide_legend(
-      # nrow = 7, ncol = 4, byrow = TRUE,
-      override.aes = list(size = 4),
-      title = "Cell Type")
-      ) +
-  theme(
-  #         legend.position = "bottom",
-  #         legend.title = element_blank(),
-  #         # legend.box.spacing = unit(0, "cm"),
-  #         legend.key.height = unit(0, "cm"),
-  #         legend.key.spacing.x = unit(0, "cm"),
-  #         legend.key.spacing.y = unit(0, "cm"),
-          legend.text = element_text(margin = margin(0,0,0,0)),
-          legend.margin = margin(0, 0, 0, 0),
-          legend.box.margin = margin(0, 0, 0, 0)
-        )
-
-ggsave("Control_Time_Patient_AllCells.png",
-cond_time_pat,
-height = 5,
-width = 7,
-units = "in",
-dpi = 600,
-device = "png", ,bg="white")
-
-```
-
-```{r Fig5C_df_subset}
-# cond_time_sub----
-
-# Subset by cell types in list
-list_cells <- c("Non-switch mem B", "Naive B", "Naive CD8 T", "Tfh", "Th1", "Naive CD4 T", "Classical mono", "Vd2 gd T", "Th1/Th17", "MAIT", "Non-Vd2 gd T", "Myeloid DCs")
-
-# Subset by cell types in list
-Fig5C_df_subset <- Fig5C_df |> filter(cell_type_fine %in% list_cells)
-```
-
-```{r cond_time_sub}
-target_n <- Fig5C_df_subset %>%
-  dplyr::count(Condition, time) %>%
-  slice_min(order_by = n) %>%
-  pull(n)
-
-scaling_factors <- Fig5C_df_subset %>%
-  dplyr::count(Condition, time) %>%
-  mutate(scaling_factor = target_n / n)
-
-Fig5C_df_subset_mod <- Fig5C_df_subset %>%
-  filter((sample %in% c("L211932_T1", "L214612_T1")) | (Condition == "Patient")) |> 
-  group_by(Condition, time, cell_type_fine) %>%
+Fig5C_df <- Fig5C_df_subset |>
+  filter(sample %in% c("L211932_T1", "L214612_T1") | Condition == "Patient") |>
+  group_by(Condition, time, cell_type_fine) |>
   group_modify(~ {
-    # .x is the data for this group
-    # .y is a tibble of the grouping keys, e.g. Condition, time, cell_type_fine
-
-    # 1) Retrieve the correct scaling_factor from our precomputed table
-    scale_val <- scaling_factors %>%
-      filter(Condition == .y$Condition, time == .y$time) %>%
+    scale_val <- fig_5c_scaling_factors |>
+      filter(Condition == .y$Condition, time == .y$time) |>
       pull(scaling_factor)
 
-    # 2) Calculate how many cells to keep in this group
     n_to_sample <- round(nrow(.x) * scale_val)
 
-    # 3) Randomly sample that many rows
     slice_sample(.x, n = n_to_sample)
-  }) %>%
+  }) |>
   ungroup() |>
-  mutate(cell_type_fine = str_replace_all(cell_type_fine, " cells", ""))
-
-cond_time_sub <- ggplot(Fig5C_df_subset_mod, aes(umap_2, umap_1, color = cell_type_fine)) +
-  geom_point(size = 0.3, stroke = 0, shape = 19) + 
-  #gghighlight(use_direct_label = F) + 
-  # scale_x_continuous(limits = c(-8.3, 8.3)) +
-  facet_wrap(~ condition_time) + 
-  ggthemes::theme_tufte(base_size = 10) + 
-  xlab("UMAP 1") +
-  ylab(expression("UMAP 2")) +
-    guides(color = guide_legend(
-      # nrow = 4, ncol = 3, byrow = TRUE,
-                                override.aes = list(size = 2), 
-                                title = "Cell Type",
-                                title.position = "top")
-           ) +
-    theme(
-  #         legend.position = "bottom",
-          # legend.title = element_blank(),
-          legend.box.spacing = unit(0, "cm"),
-          legend.key.height = unit(0, "cm"),
-          legend.key.spacing.x = unit(0, "cm"),
-          legend.key.spacing.y = unit(0, "cm"),
-          legend.text = element_text(margin = margin(0,0,0,0)),
-          legend.margin = margin(0, 0, 0, 0),
-          legend.box.margin = margin(0, 0, 0, 0)
+  mutate(
+    cell_type_fine = str_replace_all(cell_type_fine, " cells", ""),
+    condition_time = factor(
+      str_c(Condition, time, sep = "_") |>
+        str_replace("Control.*", "Control") |>
+        str_replace_all("_", " "),
+      levels = condition_time_labels
+    ),
+    cell_type_fine = factor(cell_type_fine, levels = fig_5c_cell_type_levels)
   )
 
-ggsave("Control_Time_SubsetCells.png",
-cond_time_sub,
-height = 2, #2
-width = 4, #4
-units = "in",
-dpi = 600,
-device = "png", ,bg="white")
-
-cond_time_sub
-```
-
-```{r Control_Time_Patient_SubCells, eval=F}
-# Time and patient Subset ----
-cond_time_pat <- ggplot(Fig5C_df_subset, aes(umap_2, umap_1, color = cell_type_fine)) +
-  geom_point(size = 0.03767612, stroke = 0.5, shape = 19) + 
-  #gghighlight(use_direct_label = F) + 
-  facet_wrap(~ condition_patient_time) + 
-  ggthemes::theme_tufte() + 
+fig_5c <- ggplot(Fig5C_df, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(
+    size = 0.3,
+    stroke = 0,
+    shape = 19,
+    key_glyph = ggplot2::draw_key_blank
+  ) +
+  facet_wrap(~ condition_time) +
+  coord_equal() +
+  scale_color_manual(
+    values = fig_5c_cell_type_colors,
+    breaks = fig_5c_legend_cell_type_levels,
+    labels = fig_5c_cell_type_color_labels[fig_5c_legend_cell_type_levels]
+  ) +
+  ggthemes::theme_tufte(base_size = 8, base_family = "Arial") +
   xlab("UMAP 1") +
-  ylab(expression("UMAP 2")) +
-  guides(color = guide_legend(override.aes = list(size = 4), title = "Cell Type"))
-
-ggsave("Control_Time_Patient_SubCells.png",
-cond_time_pat,
-#height = 6.22,
-width = 12.22,
-units = "in",
-dpi = 320,
-device = "png", ,bg="white")
-
-cond_time_pat
-```
-
-```{r Fig5E_ClassicMono_UMAP_V2, eval=F}
-# Classical Monocytes with gene list ----
-DefaultAssay(res_0.9) = 'originalexp'
-
-# subset to classical monocytes
-Idents(res_0.9) <- res_0.9$cell_type_fine
-classical_monocytes <- subset(res_0.9, idents = "Classical mono")
-
-plot_genes <- c("CD14", "FCGR3A", "HBEGF", "GPR183", "RASGEF1B", "ATF3", "IER3", "MXD1", "CCL3L1", "NR4A1", "NFIL3", "NAMPT", "SGK1", "RIPK2", "BCL2A1", "TMEM170B", "EGR1", "CXCL8", "EREG", "ZFP36", "PLAUR", "BTG2", "KLF10", "C5AR1", "IFITM3", "RGS2", "STK17B", "PF4", "PPBP")
-
-annot <- AnnotationDbi::select(
-      org.Hs.eg.db, # the database
-      keys = plot_genes, # which genes to look up in the database
-      keytype = "SYMBOL", # type of identifier in the previous argument 
-      columns = c("ENSEMBL") # the info to get from the database
+  ylab("UMAP 2") +
+  guides(
+    color = guide_legend(
+      title = NULL,
+      ncol = 4,
+      byrow = TRUE,
+      keywidth = unit(0, "pt"),
+      keyheight = unit(7, "pt"),
+      override.aes = list(size = 0, alpha = 0)
     )
-annot <- annot[!annot$ENSEMBL %in% c("ENSG00000237155", "ENSG00000230128", "ENSG00000227231", "ENSG00000235030", "ENSG00000206478", "ENSG00000277796", "ENSG00000277768", "ENSG00000277336"),]
+  ) +
+  umap_arial_text_min_8 +
+  theme(
+    legend.position = "bottom",
+    legend.location = "panel",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_blank(),
+    legend.text = ggtext::element_markdown(
+      family = "Arial",
+      size = 8,
+      margin = margin(0, 0, 0, 0)
+    ),
+    legend.key = element_blank(),
+    legend.key.width = unit(0, "pt"),
+    legend.key.height = unit(7, "pt"),
+    legend.spacing.x = unit(3, "pt"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(t = 2, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(0, "pt"),
+    plot.margin = margin(2, 2, 0, 2)
+  )
 
-annot$SYMBOL <- gsub("FCGR3A", "CD16", annot$SYMBOL)
+ggsave(
+  here::here("fig_5_files", "figure_05c_pbmc_umap_condition_time.png"),
+  fig_5c,
+  height = 2.1,
+  width = 4,
+  units = "in",
+  dpi = 600,
+  device = ragg::agg_png,
+  bg = "white"
+)
 
-out <- FeaturePlot(classical_monocytes, dim=c(2,1), features = annot$ENSEMBL, combine = FALSE)
-
-
-for(i in 1:length(out)) {
-  out[[i]] <- out[[i]] + NoLegend() + NoAxes() + ggtitle(annot$SYMBOL[i]) + theme(plot.title = element_text(size = 14))
-}
-
-out_cow <- cowplot::plot_grid(plotlist = out)
-ggsave("Fig5E_ClassicMono_UMAP_V2.png",
-out_cow,
-height = 14.22,
-width = 12,
-units = "in",
-dpi = 320,
-device = "png", ,bg="white")
+fig_5c
 ```
 
 # pseudobulk
 ```{r pseudobulk}
-seurat.integrated <- readRDS("~/lyme/output/seurat.integrated.rds")
+if (file.exists(figure5_pseudobulk_counts_path)) {
+  cts.split.modified <- readRDS(figure5_pseudobulk_counts_path)
+} else {
+  cts <- Seurat::AggregateExpression(
+    res_0.9,
+    group.by = c("cell_type_fine_full", "sample"),
+    slot = "counts",
+    assays = "originalexp",
+    return.seurat = FALSE
+  )$originalexp
 
-# removing cells with fewer than 500 detected genes otherwise the FindNeighbors step fails because of matirx sparsity
-seurat.integrated2 <- subset(seurat.integrated, nFeature_originalexp > 500)
+  cts.t <- cts |>
+    as.data.frame() |>
+    t() |>
+    as.data.frame()
 
-# removing the same cells from the labeling objects too
-predictions_dice_m <- readRDS("~/lyme/output/reference sets/predictions_dice_m.rds")
+  cts.split.modified <- cts.t |>
+    split(f = factor(gsub("_.*", "", rownames(cts.t)))) |>
+    purrr::map(
+      ~ .x |>
+        `rownames<-`(str_replace(rownames(.x), "(.*)_(L\\d+)-(T\\d)", "\\2_\\3")) |>
+        t()
+    )
 
-rownames(predictions_dice_m) <- seurat.integrated |> colnames() # needed for next step
+  saveRDS(cts.split.modified, figure5_pseudobulk_counts_path)
+}
 
-predictions_dice_m <- predictions_dice_m[
-  rownames(predictions_dice_m) %in% colnames(seurat.integrated2),
-  ]
+participants <- readr::read_csv(
+  here::here("data", "metadata", "sc_sampleData.csv"),
+  show_col_types = FALSE
+) |>
+  mutate(
+    sample = as.character(sample),
+    Subject_ID = factor(Subject_ID),
+    time = relevel(factor(time), ref = "T4")
+  ) |>
+  dplyr::select(sample, Subject_ID, time)
 
-predictions_monaco_f <- readRDS("~/lyme/output/reference sets/predictions_monaco_f.rds")
+figure5_de_samples <- c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")
 
-rownames(predictions_monaco_f) <- seurat.integrated |> colnames() # needed for next step
+if (file.exists(figure5_de_time_path)) {
+  de_time <- readRDS(figure5_de_time_path)
+} else {
+  countData_list <- cts.split.modified |>
+    purrr::keep(~ all(figure5_de_samples %in% colnames(.x))) |>
+    purrr::map(
+      ~ as.data.frame(.x) |>
+        dplyr::select(dplyr::all_of(figure5_de_samples)) |>
+        dplyr::filter(rowSums(.) > 0)
+    )
 
-predictions_monaco_f <- predictions_monaco_f[
-  rownames(predictions_monaco_f) %in% colnames(seurat.integrated2),
-  ]
+  colData_list <- countData_list |>
+    purrr::map(
+      ~ participants |>
+        dplyr::filter(sample %in% colnames(.x)) |>
+        dplyr::arrange(match(sample, colnames(.x))) |>
+        tibble::column_to_rownames("sample")
+    )
 
-# add cell type annotations
-# seurat.integrated2@meta.data$cell_type_coarse <- predictions_monaco_m$labels
-seurat.integrated2@meta.data$cell_type_fine <- predictions_monaco_f$labels
+  stopifnot(
+    all(purrr::map2_lgl(
+      countData_list,
+      colData_list,
+      ~ identical(colnames(.x), rownames(.y))
+    ))
+  )
 
-# specify that we will perform downstream analysis on the un-integrated data
-DefaultAssay(seurat.integrated2) <- "originalexp"
+  time <- purrr::map2(
+    countData_list,
+    colData_list,
+    ~ DESeq2::DESeqDataSetFromMatrix(
+      countData = round(.x),
+      colData = .y,
+      design = ~ Subject_ID + time
+    ) |>
+      DESeq2::DESeq()
+  )
 
-cts <- AggregateExpression(seurat.integrated2, 
-                           group.by = c("cell_type_fine", "sample"),
-                           slot = "counts",
-                           assays = 'originalexp',
-                           return.seurat = FALSE)
+  names(time) <- names(countData_list)
 
-cts <- cts$originalexp
+  de_time <- purrr::map_dfr(
+    .x = time,
+    ~ DESeq2::results(.x, contrast = c("time", "T1", "T4")) |>
+      as.data.frame() |>
+      rownames_to_column("ID"),
+    .id = "cell"
+  )
 
-cts <- cts |> as.data.frame()
+  gene_annotation <- tibble(ID = unique(de_time$ID)) |>
+    mutate(
+      gene = AnnotationDbi::mapIds(
+        org.Hs.eg.db::org.Hs.eg.db,
+        keys = ID,
+        keytype = "ENSEMBL",
+        column = "SYMBOL",
+        multiVals = "first"
+      ),
+      role = AnnotationDbi::mapIds(
+        org.Hs.eg.db::org.Hs.eg.db,
+        keys = ID,
+        keytype = "ENSEMBL",
+        column = "GENENAME",
+        multiVals = "first"
+      ),
+      gene = coalesce(gene, ID),
+      role = coalesce(role, "")
+    )
 
-# transpose
-cts.t <- t(cts)
+  de_time <- de_time |>
+    left_join(gene_annotation, by = "ID") |>
+    dplyr::select(cell, gene, ID, role, padj, baseMean, log2FoldChange, lfcSE, stat, pvalue)
 
-# convert to data.frame
-cts.t <- as.data.frame(cts.t)
-
-# get values where to split
-splitRows <- gsub('_.*', '', rownames(cts.t))
-
-# split data.frame
-cts.split <- split.data.frame(cts.t,
-                              f = factor(splitRows))
-
-# fix colnames and transpose
-cts.split.modified <- map(.x = cts.split, 
-                          ~ .x |> `rownames<-` (str_replace(rownames(.x), "(.*)_(L\\d+)-(T\\d)", "\\2_\\3")) |> 
-                            t()
-                          )
-
-# rm(list = base::setdiff(ls(), c("cts.split.modified", "seurat.integrated", "seurat.integrated2")))
-
-# saveRDS(cts.split.modified, file="./output/cts.split.modified.rds")
+  saveRDS(de_time, figure5_de_time_path)
+}
 ```
-
 # 5d
+### Panel D: Cell-Type Abundance Forest Plot
 ```{r abundance_time_glm}
-data_time <- seurat.integrated2@meta.data |>
+data_time <- res_0.9@meta.data |>
   filter(sample %in% c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")) |>
-  dplyr::select(cell_type_fine, Subject_ID, time) 
+  dplyr::select(cell_type_fine = cell_type_fine_full, Subject_ID, time) 
 
 # making a list of unique cell types in the data
 cell_type <- data_time |> dplyr::distinct(cell_type_fine) |> pluck(1)
@@ -813,7 +658,7 @@ results_time2 <- results_time |>
                                  estimate_exp < 1 ~ conf.high_exp-1)) |> 
   mutate(cell = fct_reorder(cell, estimate_exp))
 
-p <- results_time2 |> 
+fig_5d <- results_time2 |> 
   ggplot(aes(y=cell, x=estimate_exp, xmin=conf.low_exp, xmax=conf.high_exp, color = `FDR < 0.05`
              )
          ) +
@@ -860,126 +705,27 @@ p <- results_time2 |>
     axis.line.x.bottom = element_line(color = "grey")
     )
 
-pngfile <- fs::path("forest_plot.png")
-
  ggsave(
-  pngfile,
-  p,
+here::here("fig_5_files", "figure_05d_pbmc_cell_type_abundance_forest.png"),
+  fig_5d,
   device = ragg::agg_png,
-  width = 3.55, height = 2.5, units = "in", res = 300,
-  scaling = 0.7
+  width = 3.55, 
+  height = 2.5, 
+  units = "in", 
+  res = 300,
+  scaling = 0.7,
+  bg = "white"
 )
+
+fig_5d
 ```
 
 # 5e
-```{r de_time}
-participants <- readxl::read_excel("data/sc_sampleData.xlsx")
 
-# # Dropping empty rows instead of empty cell types
-# countData <- map_dfr(cts.split.modified, ~as.data.frame(.x) |> rownames_to_column(), .id ="cell")
-# 
-# countData <- countData |> dplyr::select(c(1, 2, L204127_T1, L204127_T4, L204185_T1, L204185_T4))) |> drop_na() |>
-#   mutate(cell = cell |> as.factor())
-# 
-# countData_list <- split.data.frame(countData, f = factor(countData$cell)) |> 
-# map(.x = _, ~dplyr::select(.x, c(L204127_T1, L204127_T4, L204185_T1, L204185_T4)))
-
-# # Dropping empty cell types instead of empty rows
-countData_list <- map(cts.split.modified[-c(7,8)], ~as.data.frame(.x) |>
-                        dplyr::select(c(L204127_T1, L204127_T4, L204185_T1, L204185_T4))
-                      )
-
-colData_list <- map(countData_list, ~ .x |> colnames() |> tibble() |> dplyr::rename("sample" = 1) |> inner_join(participants))
-
-time <- vector("list", length = length(countData_list))
-
-for(i in seq_along(time)){ 
-  time[[i]] <- DESeqDataSetFromMatrix(countData = countData_list[[i]],
-                                           colData = colData_list[[i]],
-                                           design = ~ as.factor(Subject_ID) + 
-                                        (time|> as.factor() |> relevel(ref = "T4"))
-                                      )
-  # run DESeq2
-  time[[i]] <- DESeq(time[[i]])
-}
-
-# names(time) <- countData$cell |> levels()
-names(time) <- cts.split.modified[-c(7,8)] |> names()
-
-de_time <- map_dfr(
-  .x = time,
-  ~ .x |> results() |> as.data.frame() |> # filter(padj < 0.05) |> 
-    rownames_to_column(),
-  .id ="cell"
-)
-
-genes <- readRDS("./output/sce/L204127_T1.sce.rds") |> 
-  rowData() |> base::as.data.frame() |> dplyr::select(-Type) |> dplyr::rename(gene = Symbol)
-
-genes <- genes |> 
-  left_join(
-    AnnotationDbi::select(
-      org.Hs.eg.db, # the database
-      keys = genes$ID, # which genes to look up in the database
-      keytype = "ENSEMBL", # type of identifier in the previous argument 
-      columns = c("GENENAME") # the info to get from the database
-      ) |> dplyr::rename(ID = ENSEMBL, role = GENENAME)
-    )
-
-de_time <- de_time |> 
-  dplyr::rename(ID = rowname) |> 
-  left_join(genes, by = "ID")|>
-  dplyr::select(cell, gene, ID, role, padj, 3:8)
-
-# # de_time |> DT::datatable() |>
-# #   DT::formatRound(digits =2, columns = 3:8)
-
-# write.xlsx(de_time, './output/deg/de_time.xlsx')
-
-# genes that are DE in two or more cell types
-repeated_genes <- de_time |> 
-  filter(padj <= 0.05) |> 
-  dplyr::count(gene) |> 
-  arrange(desc(n)) |> 
-  filter(n >= 2) |> 
-  pluck("gene")
-
-# combining normalized gene counts with differential expression results
-normalized_values <- map(.x = time, ~ .x |> counts(normalized = TRUE) |> as.data.frame()) |> list_rbind(names_to = "cell") |> rownames_to_column() |> mutate(rowname = rowname |> str_split_i(pattern = "\\.{3}", i =1)) |> dplyr::rename(ID = rowname) 
-
-combined_values <- left_join(de_time |> 
-            unite(cell_id, cell, ID, sep = "_"),
-          normalized_values |> 
-            unite(cell_id, cell, ID, sep = "_"), 
-          by = "cell_id") |> 
-  pivot_longer(cols = 10:13, names_to = "sample") 
-
-# removing genes where even a single sample has a normalized count of zero
-combined_values_wide <- left_join(de_time |>
-            unite(cell_id, cell, ID, sep = "_"),
-          normalized_values |>
-            unite(cell_id, cell, ID, sep = "_"),
-          by = "cell_id") |>
-  separate(col = cell_id, into = c("cell", "ID"), sep = "_") |>
-  filter(if_all(where(is.numeric), ~ .x != 0)) # filter rows where all numeric are non-zero
-
-table_s3 <- combined_values_wide |> filter(padj <= 0.05) |> 
-  rename(
-    ensembl_id = ID,
-    gene_name = gene,
-    gene_function = role,
-    mean_expression = baseMean,
-    log2_fold_change = log2FoldChange,
-    lfc_standard_error = lfcSE,
-    wald_statistic = stat,
-    p_value = pvalue,
-    adjusted_p_value = padj
-  )
-```
-
+### Panel E: Differentially Expressed Gene Counts by Cell Type
 ```{r de_number_plot}
 # total number of significant genes per cell type
-de_number <- de_time |> 
+fig_5e <- de_time |> 
   filter(padj <= 0.05) |> 
   dplyr::count(cell) |> 
   mutate(developmental_order = # to arrange by developmental order after n
@@ -1011,18 +757,20 @@ de_number <- de_time |>
     axis.text = element_text(color = "black"),
     axis.ticks.y = element_blank())
   
-pngfile <- fs::path("de_number.png")
-
  ggsave(
-  pngfile,
-  de_number,
+here::here("fig_5_files", "figure_05e_pbmc_differential_gene_counts.png"),
+  fig_5e,
   device = ragg::agg_png,
   width = 7.5, height = 2.4, units = "in", 
   res = 300,
-  scaling = 1.2)
+  scaling = 1.2,
+  bg = "white")
+
+fig_5e
 ```
 
 # 5f
+### Panel F: Monocyte Pathway-Level Gene Expression
 ```{r monocyte_expression_pathway}
 # assign pathways to genes----
 pathways <- data.frame(
@@ -1083,8 +831,11 @@ pathways <- data.frame(
   
 # Filter significant genes and ensure distinct entries
 de_time_filtered <- de_time %>%
-  filter(padj < 0.05, cell == "Classical monocytes") %>%
-  slice(-24)
+  filter(
+    padj < 0.05,
+    cell == "Classical monocytes",
+    gene %in% pathways$gene
+  )
 
 # Sort genes by log2FoldChange
 sorted_genes <- de_time_filtered %>%
@@ -1169,18 +920,24 @@ geom_segment(x = 0,
       scale_color_gradient(high = "#132B43", low = "#56B1F7")  # Reverse if using blue shades
 
 # Combine plots
-aligned_plot <- gene_expression_plot + upset_plot
+fig_5f <- gene_expression_plot + upset_plot
 
-aligned_plot
+fig_5f
 
 # Save the plot
 ggsave(
-  filename = "aligned_plot.png",
-  plot = aligned_plot,
+  here::here("fig_5_files", "figure_05f_monocyte_pathway_expression.png"),
+  plot = fig_5f,
   device =  ragg::agg_png,
   width = 7,
   height = 3.5,
   units = "in",
   dpi = 600
   )
+
+fig_5f
+```
+
+```{r session_info}
+sessionInfo()
 ```

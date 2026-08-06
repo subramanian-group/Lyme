@@ -1,0 +1,519 @@
+---
+title: "Figure S8"
+editor_options: 
+  chunk_output_type: console
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+---
+
+```{r libraries, echo=FALSE}
+library(tidyverse)
+library(readxl)
+library(here)
+library(ggplot2)
+library(patchwork)
+library(conflicted)
+library(limma)
+library(ComplexHeatmap)
+library(clusterProfiler)
+library(Hmisc)
+library(ggraph)
+library(mice)
+library(ggpubr)
+library(Seurat)
+```
+
+```{r setup}
+#| echo: false
+
+# Resolve conflicts
+conflicts_prefer(dplyr::select,
+                 dplyr::filter,
+                 dplyr::slice,
+                 dplyr::count,
+                 dplyr::rename,
+                 dplyr::desc)
+
+# Set a global theme and base size
+theme_set(
+  theme_minimal()
+)
+
+umap_min_text_size <- 8
+umap_geom_text_size <- umap_min_text_size / ggplot2::.pt
+
+update_geom_defaults("text", list(size = umap_geom_text_size, family = "Arial"))
+
+umap_arial_text_min_8 <- theme(
+  text = element_text(family = "Arial", size = 8),
+  axis.text = element_text(family = "Arial", size = 8),
+  axis.title = element_text(family = "Arial", size = 8),
+  strip.text = element_text(family = "Arial", size = 8),
+  legend.text = element_text(family = "Arial", size = 8),
+  legend.title = element_text(family = "Arial", size = 8),
+  plot.title = element_text(family = "Arial", size = 8)
+)
+
+res_0.9 <- readRDS(
+  here::here(
+    "data", "processed", "02_internal_pbmc_scrna",
+    "seurat.integrated2_monaco_umap_res0.9.rds"
+  )
+)
+
+dir.create("fig_s8_files", showWarnings = FALSE, recursive = TRUE)
+```
+
+### Panel S8A: Symptom Plot
+
+```{r symptom_plot}
+load(here::here("data", "raw", "01_proteomics_metabolomics", "OlinkPreprocessed.RData"))
+
+## ---------------------------
+## 1. Subset samples
+## ---------------------------
+sams <- data$sampleData$time %in% c("T1","T3","T4") &
+        data$sampleData$days_of_prior_antibiotics == 0 &
+        data$sampleData$Condition == "Patient"
+
+direct <- data$directSymptoms[sams, , drop = FALSE]
+time <- data$sampleData[sams, "time"]
+
+## ---------------------------
+## 2. Clean symptom matrix
+## ---------------------------
+d <- direct
+colnames(d)[grep("Difficult", colnames(d))] <- "Difficulty Concentrating"
+colnames(d) <- gsub("\\.", " ", colnames(d))
+
+d <- d / 7.6
+d <- d[order(time), , drop = FALSE]
+time <- sort(time)
+
+rn <- rownames(d)
+
+d <- split(as.data.frame(d), time)
+d <- lapply(d, function(x) {
+  x$`Avg. Symptom Score` <- rowMeans(x, na.rm = TRUE)
+  x
+})
+
+d2 <- as.data.frame(do.call(rbind, d))
+rownames(d2) <- rn
+d2[is.na(d2)] <- 0
+
+## ---------------------------
+## 3. Ordering (rows / cols)
+## ---------------------------
+hc1 <- rownames(d2)[time == "T1"][hclust(dist(d2[time == "T1", ]))$order]
+
+hc3 <- na.omit(
+  rownames(d2)[time == "T3"][
+    match(gsub(" T.*","", hc1),
+          gsub(" T.*","", rownames(d2)[time == "T3"]))
+  ]
+)
+
+hc4 <- na.omit(
+  rownames(d2)[time == "T4"][
+    match(gsub(" T.*","", hc1),
+          gsub(" T.*","", rownames(d2)[time == "T4"]))
+  ]
+)
+
+hc1 <- c(hc1, hc3, hc4)
+
+symptom_levels <- c(
+  "Fatigue",
+  "Joint Pain",
+  "Stiff Neck",
+  "Headache",
+  "Muscle Pains",
+  "Loss of Appetite",
+  "Difficulty Concentrating",
+  "Dizziness",
+  "Feverish Chilly",
+  "Tingling Sensation",
+  "Nausea Vomiting"
+)
+
+## ---------------------------
+## 4. Long format + factors
+## ---------------------------
+d2_long <- data.frame(
+  id = rownames(d2),
+  time = c("Diagnosis","6 Months","1 Year")[match(time, unique(time))],
+  dplyr::select(d2, -`Avg. Symptom Score`),
+  check.names = FALSE
+) %>%
+  pivot_longer(cols = 3:ncol(.), values_to = "Symptom Score")
+
+d2_long$name <- gsub("\\.([A-Z])", " \\1", d2_long$name)
+d2_long$name[d2_long$name == "Tingling Abnormal Sensation"] <- "Tingling Sensation"
+
+d2_long <- d2_long |>
+  filter(name %in% symptom_levels)
+
+d2_long$id <- factor(d2_long$id, levels = hc1, ordered = TRUE)
+d2_long$name <- factor(
+  d2_long$name,
+  levels = rev(symptom_levels),
+  ordered = TRUE
+)
+d2_long$time <- factor(
+  d2_long$time,
+  levels = c("Diagnosis","6 Months","1 Year"),
+  ordered = TRUE
+)
+
+## ---------------------------
+## 5. Join with sc_sampleData
+## ---------------------------
+
+sc_sampleData <- readr::read_csv(
+  here::here("data", "metadata", "sc_sampleData.csv"),
+  show_col_types = FALSE
+)
+
+sc_sampleData <- sc_sampleData |>
+  mutate(
+        sample = sample |>
+          str_replace_all("^L", "") |>
+          str_replace_all("_", " ") |>
+          str_squish()
+      ) |> 
+  select(-time)
+
+pdat <- d2_long |>
+  rename(sample = id) |>
+  inner_join(
+    sc_sampleData,
+    by = "sample"
+  )
+
+stopifnot(nrow(pdat) > 0)
+
+## ---------------------------
+## 6. Plot
+## ---------------------------
+
+symptom_plot <- pdat |> 
+  ggplot(
+    aes(
+      x = sample,
+      y = name,
+      size = `Symptom Score`,
+      colour = `Symptom Score`
+    )
+  ) +
+    geom_point(alpha = 0.75) +
+    scale_color_gradient(low = "white", high = "red", limits = c(0,1), breaks=seq(0, 1, by=0.25)) +
+  guides(
+    color = guide_legend(
+      theme = theme(
+        legend.title.position = "top",
+        legend.title = element_text(hjust = 0.5)
+      )
+    ),
+    size = guide_legend(
+      theme = theme(
+        legend.title.position = "top",
+        legend.title = element_text(hjust = 0.5)
+      )
+    )
+  ) +
+    scale_size_continuous(range = c(1.5,2.5),limits = c(0,1), breaks=seq(0, 1, by=0.25))+
+    facet_wrap(vars(time), nrow = 1, scales = "free_x") +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+            # axis.text.x = element_blank(),
+        # axis.text.y = element_text(size = 7),
+      axis.title = element_blank(),
+      legend.position = c(-0.55,0.92),
+      # legend.position = "bottom",
+      # legend.location = "plot",
+      # legend.justification = "center",
+      # legend.box.just = "center",
+      legend.margin = margin(0, 0, 0, 0),
+      legend.title = element_text(margin = margin(0, 0, 0, 0), size = 8, hjust = 0.5),
+      legend.text = element_text(margin = margin(0, 0, 0, 0), size = 8),
+      # legend.spacing.x = unit(0, "mm"),
+      legend.key.width = unit(3, "mm"),
+      legend.key.height =  unit(0, "mm"),
+      # legend.key.spacing.x = unit(2, "mm"),
+      legend.key.spacing.y = unit(0, "mm"),
+      # legend.background = element_rect(fill = "grey85", color = NA),
+      plot.margin = margin(0, 0, 0, 0))
+
+figureS8a <- here::here(
+  "fig_s8_files",
+  "figure_S08a_pbmc_symptom_scores.png"
+)
+
+ggsave(
+  figureS8a,
+  symptom_plot,
+  device = ragg::agg_png,
+  width = 3,
+  height = 3,
+  units = "in",
+  dpi = 600
+)
+
+knitr::include_graphics(figureS8a)
+```
+
+### Panel S8C: PBMC Small-multiples Cell-type UMAP
+
+```{r fine_multiple, eval=TRUE}
+
+umap_embeddings <- Seurat::Embeddings(res_0.9, "umap") |>
+  as_tibble(rownames = "cell") |>
+  setNames(c("cell", "umap_1", "umap_2"))
+
+fine_multiple_df <- res_0.9@meta.data |>
+  tibble::rownames_to_column("cell") |>
+  dplyr::select(cell, cell_type_fine) |>
+  left_join(umap_embeddings, by = "cell") |>
+  filter(!is.na(cell_type_fine), cell_type_fine != "LD basophils")
+
+facet_levels <- setdiff(levels(fine_multiple_df$cell_type_fine), "LD basophils")
+
+fine_multiple_background <- fine_multiple_df |>
+  dplyr::select(cell, umap_1, umap_2) |>
+  tidyr::crossing(
+    facet_cell_type = factor(facet_levels, levels = facet_levels)
+  )
+
+fine_multiple_highlight <- fine_multiple_df |>
+  mutate(facet_cell_type = factor(cell_type_fine, levels = facet_levels))
+
+fine_multiple <- ggplot() +
+  geom_point(
+    data = fine_multiple_background,
+    aes(x = umap_2, y = umap_1),
+    size = 0.2,
+    stroke = 0,
+    shape = 19,
+    color = "grey85"
+  ) +
+  geom_point(
+    data = fine_multiple_highlight,
+    aes(x = umap_2, y = umap_1),
+    size = 0.2,
+    stroke = 0,
+    shape = 19,
+    color = "#e14327"
+  ) +
+  facet_wrap(~ facet_cell_type, ncol = 7) + 
+  coord_equal() +
+  ggthemes::theme_tufte(base_size = 8, base_family = "Arial") + 
+  xlab("UMAP 1 \u27f6") +
+  ylab(expression("UMAP 2 \u27f6")) +
+  umap_arial_text_min_8 +
+  theme(
+    legend.position = "none",
+    strip.clip = "off",
+    strip.text = element_text(
+      family = "Arial",
+      margin = margin(0, 0, 0, 0),
+      size = 8
+    )
+  )
+
+figureS8c <- here::here(
+  "fig_s8_files",
+  "figure_S08c_pbmc_cell_type_umap_small_multiples.png"
+)
+
+ggsave(
+  figureS8c,
+  fine_multiple,
+  height = 5,
+  width = 7.2,
+  units = "in",
+  dpi = 600,
+  device = "png",
+  bg = "white"
+)
+
+knitr::include_graphics(figureS8c)
+```
+
+### Panel S8B: PBMC UMAP by Condition and Time
+
+```{r subject_cell_counts, eval=TRUE}
+
+FigS8B_df <- res_0.9@meta.data |> 
+  base::cbind(res_0.9@reductions$umap@cell.embeddings)
+
+table(FigS8B_df$Condition, FigS8B_df$patient)
+table(FigS8B_df$time, FigS8B_df$patient)
+table(FigS8B_df$time, FigS8B_df$Condition)
+
+```
+
+```{r Control_Time_Patient_AllCells}
+# Time and patient----
+
+set.seed(111)
+
+fig_s8b_cell_type_levels <- c(
+  "Classical mono",
+  "Exhausted B",
+  "Int mono",
+  "MAIT",
+  "Myeloid DCs",
+  "Naive B",
+  "Naive CD4 T",
+  "Naive CD8 T",
+  "NK cells",
+  "Non-class mono",
+  "Non-switch mem B",
+  "Non-Vd2 gd T",
+  "pDCs",
+  "Plasmablasts",
+  "Progenitor",
+  "Switched mem B",
+  "Tcm CD8 T",
+  "Tem CD8 T",
+  "Temra CD4 T",
+  "Temra CD8 T",
+  "Tfh",
+  "Th1",
+  "Th1/Th17",
+  "Th17",
+  "Th2",
+  "Treg",
+  "Vd2 gd T"
+)
+
+fig_s8b_cell_type_colors <- scales::hue_pal()(length(fig_s8b_cell_type_levels)) |>
+  setNames(fig_s8b_cell_type_levels)
+
+fig_s8b_cell_type_color_labels <- sprintf(
+  "<span style='color:%s'>%s</span>",
+  fig_s8b_cell_type_colors,
+  names(fig_s8b_cell_type_colors)
+) |>
+  setNames(names(fig_s8b_cell_type_colors))
+
+condition_patient_time_levels <- c(
+  "Control_214612_T1",
+  "Patient_204127_T1",
+  "Patient_204127_T4",
+  "Control_211932_T1",
+  "Patient_204185_T1",
+  "Patient_204185_T4"
+)
+
+condition_patient_time_labels <- str_replace_all(
+  condition_patient_time_levels,
+  "_",
+  " "
+) |>
+  str_replace("^(Control|Patient) ", "\\1\n")
+
+set.seed(111)
+
+FigS8B_df <- res_0.9@meta.data |>
+  base::cbind(res_0.9@reductions$umap@cell.embeddings) |>
+  filter(Condition == "Patient" | sample %in% c("L211932_T1", "L214612_T1")) |>
+  unite(col = "condition_patient_time", c(Condition, Subject_ID, time), remove = FALSE) |>
+  mutate(
+    condition_patient_time = factor(
+      condition_patient_time,
+      levels = condition_patient_time_levels
+    )
+  ) |>
+  filter(cell_type_fine %in% fig_s8b_cell_type_levels, !is.na(condition_patient_time)) |>
+  mutate(cell_type_fine = factor(cell_type_fine, levels = fig_s8b_cell_type_levels))
+
+fig_s8b_target_n <- FigS8B_df |>
+  count(condition_patient_time) |>
+  pull(n) |>
+  min()
+
+FigS8B_df <- FigS8B_df |>
+  group_by(condition_patient_time) |>
+  slice_sample(n = fig_s8b_target_n) |>
+  ungroup() |>
+  mutate(
+    condition_patient_time = factor(
+      str_replace_all(as.character(condition_patient_time), "_", " ") |>
+        str_replace("^(Control|Patient) ", "\\1\n"),
+      levels = condition_patient_time_labels
+    )
+  )
+
+fig_s8b <- ggplot(FigS8B_df, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(size = 0.3, stroke = 0, shape = 19, key_glyph = ggplot2::draw_key_blank) +
+  facet_wrap(~ condition_patient_time, nrow = 2) +
+  coord_equal() +
+  scale_color_manual(
+    values = fig_s8b_cell_type_colors,
+    breaks = fig_s8b_cell_type_levels,
+    labels = fig_s8b_cell_type_color_labels
+  ) +
+  ggthemes::theme_tufte(base_size = 8, base_family = "Arial") +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") +
+  guides(
+    color = guide_legend(
+      title = NULL,
+      ncol = 3,
+      byrow = TRUE,
+      keywidth = unit(0, "pt"),
+      keyheight = unit(7, "pt"),
+      override.aes = list(size = 0, alpha = 0)
+    )
+  ) +
+  umap_arial_text_min_8 +
+  theme(
+    legend.position = "bottom",
+    legend.location = "panel",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_blank(),
+    legend.text = ggtext::element_markdown(
+      family = "Arial",
+      size = 7,
+      margin = margin(0, 0, 0, 0)
+    ),
+    legend.key = element_blank(),
+    legend.key.width = unit(0, "pt"),
+    legend.key.height = unit(7, "pt"),
+    legend.spacing.x = unit(3, "pt"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(t = 2, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(0, "pt"),
+    plot.margin = margin(2, 2, 0, 2)
+  )
+
+figureS8b <- here::here(
+  "fig_s8_files",
+  "figure_S08b_pbmc_umap_condition_time.png"
+)
+
+ggsave(
+  figureS8b,
+  fig_s8b,
+  height = 3.8,
+  width = 3.1,
+  units = "in",
+  dpi = 600,
+  device = ragg::agg_png,
+  bg = "white"
+)
+
+knitr::include_graphics(figureS8b)
+```
+
+```{r session_info}
+sessionInfo()
+```

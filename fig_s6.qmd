@@ -1,0 +1,22 @@
+---
+title: "Figure S6"
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+---
+
+### Flow Cytometry Pipeline Schematic
+
+```{r figureS6_flow_cytometry_pipeline_schematic}
+#| fig-cap: "Figure S6"
+
+figureS6 <- here::here(
+  "fig_s6_files",
+  "figure_S06_flow_cytometry_pipeline_schematic.png"
+)
+
+knitr::include_graphics(figureS6)
+```

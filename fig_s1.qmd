@@ -1,28 +1,43 @@
 ---
-title: "Untitled"
-format: html
+title: "Figure S1"
 editor_options: 
   chunk_output_type: console
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
 ---
 
 ```{r setup, echo=FALSE}
-knitr::opts_chunk$set(
-  library(tidyverse),
-  library(patchwork),
-  library(limma),
-  library(ComplexHeatmap),
-  library(clusterProfiler),
-  library(Hmisc),
-  library(ggraph),
-  library(ggrepel)
-)
+library(tidyverse)
+library(patchwork)
+library(limma)
+library(ComplexHeatmap)
+library(clusterProfiler)
+library(Hmisc)
+library(ggraph)
+library(ggrepel)
+library(sva)
+library(caret)
+library(glmnet)
+library(progress)
+
+options(stringsAsFactors = FALSE, bitmapType = "cairo")
+knitr::opts_chunk$set()
+
+dir.create("fig_s1_files", showWarnings = FALSE, recursive = TRUE)
 ```
 
 ## Load Functions
 
 ```{r load_functions, results='hide'}
 # Functions ---------------------------------------------------------------
-source(file = "./R/General Functions.R")
+general_functions <- here::here("scripts", "common", "general_functions.R")
+if (file.exists(general_functions)) {
+  source(file = general_functions)
+}
 
 returnSigStars = function(x){
   x2 = x
@@ -407,24 +422,308 @@ plot_pca = function(pca,color,components=c(1,2),label=F,n=10,scale = 5,draw_load
 ```
 
 ```{r}
-load("data/OlinkPreprocessed.RData")
+load(here::here("data", "raw", "01_proteomics_metabolomics", "OlinkPreprocessed.RData"))
 ```
 
 ##
 
-```{r prior_anitbiotic}
-data$sampleData |> filter(time == "T1", Condition == "Patient") |> 
-    ggplot(aes(x = days_of_prior_antibiotics)) +
-    geom_bar() +
-    xlab("Days of Prior Antibiotics") +
-    ylab("Frequency")
+### Panel A: Patient Sample Availability by Assay and Visit
+```{r figureS1a_patient_count_heatmap}
+patient_count_heatmap <- local({
+  processed_env <- new.env()
+  load(
+    here::here(
+      "data", "processed", "01_proteomics_metabolomics", "Data.RData"
+    ),
+    envir = processed_env
+  )
+  processed_data <- processed_env$data
+  sample_data <- processed_data$sampleData
+
+  flow_sample_ids <- purrr::reduce(
+    c("bcell", "tcell", "monocyte", "dcnk"),
+    function(ids, panel_name) {
+      panel_env <- new.env()
+      load(
+        here::here(
+          "data", "intermediate", "flow_gating",
+          paste0(panel_name, ".RData")
+        ),
+        envir = panel_env
+      )
+      union(
+        ids,
+        as.character(panel_env[[panel_name]]$propsLong$id)
+      )
+    },
+    .init = character()
+  )
+
+  samples_with_data <- function(x) {
+    rownames(x)[rowSums(!is.na(x)) > 0]
+  }
+
+  assay_availability <- dplyr::bind_rows(
+    sample_data |>
+      dplyr::filter(sample %in% flow_sample_ids) |>
+      dplyr::transmute(
+        Subject_ID = as.character(Subject_ID),
+        Condition,
+        time,
+        dataset = "Flow"
+      ),
+    sample_data |>
+      dplyr::filter(sample %in% samples_with_data(processed_data$data)) |>
+      dplyr::transmute(
+        Subject_ID = as.character(Subject_ID),
+        Condition,
+        time,
+        dataset = "Olink: Inflammation, IR"
+      ),
+    sample_data |>
+      dplyr::filter(sample %in% samples_with_data(processed_data$olinkNew)) |>
+      dplyr::transmute(
+        Subject_ID = as.character(Subject_ID),
+        Condition,
+        time,
+        dataset = "Olink: Metabolism, CVD, OD"
+      ),
+    sample_data |>
+      dplyr::filter(
+        sample %in% samples_with_data(processed_data$metabolon$pat_data)
+      ) |>
+      dplyr::transmute(
+        Subject_ID = as.character(Subject_ID),
+        Condition,
+        time,
+        dataset = "Metabolon"
+      ),
+    readr::read_csv(
+      here::here("data", "metadata", "sc_sampleData.csv"),
+      show_col_types = FALSE
+    ) |>
+      dplyr::transmute(
+        Subject_ID = as.character(Subject_ID),
+        Condition,
+        time,
+        dataset = "scRNA-seq"
+      )
+  ) |>
+    dplyr::distinct()
+
+  time_levels <- c("T1", "T2", "T3", "T4")
+  dataset_levels <- c(
+    "Flow",
+    "Metabolon",
+    "Olink: Inflammation, IR",
+    "Olink: Metabolism, CVD, OD",
+    "scRNA-seq"
+  )
+
+  heat_counts <- assay_availability |>
+    dplyr::filter(
+      Condition == "Patient",
+      time %in% time_levels
+    ) |>
+    dplyr::count(dataset, time, name = "n_present") |>
+    tidyr::complete(
+      dataset = dataset_levels,
+      time = time_levels,
+      fill = list(n_present = 0)
+    ) |>
+    dplyr::mutate(
+      dataset = factor(dataset, levels = dataset_levels),
+      time = factor(time, levels = time_levels),
+      n_fill = dplyr::na_if(n_present, 0L)
+    )
+
+  positive_counts <- heat_counts$n_present[heat_counts$n_present > 0]
+  blues <- RColorBrewer::brewer.pal(9, "Blues")
+
+  ggplot(heat_counts, aes(x = time, y = dataset, fill = n_fill)) +
+    geom_tile(width = 0.98, height = 0.97) +
+    coord_cartesian(expand = FALSE) +
+    scale_fill_gradient(
+      low = blues[2],
+      high = blues[9],
+      limits = range(positive_counts),
+      na.value = "white",
+      name = "Patient count"
+    ) +
+    labs(x = NULL, y = NULL) +
+    theme_minimal(base_size = 8, base_family = "Arial") +
+    theme(
+      panel.border = element_rect(
+        colour = "black",
+        fill = NA,
+        linewidth = 0.1
+      ),
+      panel.grid = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.title.position = "top",
+      legend.margin = margin(0, 0, 0, 0),
+      legend.spacing.x = unit(0, "mm"),
+      legend.spacing.y = unit(0, "mm")
+    ) +
+    guides(
+      fill = guide_colourbar(
+        frame.colour = "black",
+        frame.linewidth = 0.1
+      )
+    )
+})
+
+patient_count_heatmap
+
+ggsave(
+  here::here("fig_s1_files", "figure_S01a_assay_sample_availability_heatmap.png"),
+  patient_count_heatmap,
+  device = ragg::agg_png,
+  width = 3,
+  height = 2,
+  units = "in",
+  dpi = 600
+)
 ```
 
+### Panel B: Prior Antibiotic Exposure Distribution
+```{r figureS1b_prior_antibiotic_exposure}
+antibiotic_exposure_cols <- c(
+  "Antibiotic-naive" = "#00BFC4",
+  "Antibiotic non-naive" = "#F8766D"
+)
 
-## Differential Expression
+antibiotic_exposure_labels <- paste0(
+  "<span style='color:",
+  unname(antibiotic_exposure_cols),
+  ";'>",
+  names(antibiotic_exposure_cols),
+  "</span>"
+)
+
+prior_antibiotic_exposure <- data$sampleData |>
+  filter(time == "T1", Condition == "Patient",
+      Subject_ID != "201455",
+      ) |>
+  mutate(
+    antibiotic_exposure = case_when(
+      days_of_prior_antibiotics == 0 ~ "Antibiotic-naive",
+      days_of_prior_antibiotics > 0 ~ "Antibiotic non-naive"
+    ),
+    antibiotic_exposure = factor(
+      antibiotic_exposure,
+      levels = names(antibiotic_exposure_cols)
+    )
+  ) |>
+  ggplot(aes(x = days_of_prior_antibiotics, fill = antibiotic_exposure)) +
+  geom_bar() +
+  scale_fill_manual(
+    values = antibiotic_exposure_cols,
+    breaks = names(antibiotic_exposure_cols),
+    labels = antibiotic_exposure_labels,
+    guide = guide_legend(
+      override.aes = list(alpha = 0),
+      keyheight = grid::unit(0.01, "pt"),
+      keywidth = grid::unit(0.01, "pt")
+    )
+  ) +
+  xlab("Days of prior antibiotics") +
+  ylab("Frequency") +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = c(0.10, 0.75),
+    legend.justification = c(0, 0.5),
+    legend.title = element_blank(),
+    legend.key = element_blank(),
+    legend.key.height = grid::unit(0.01, "pt"),
+    legend.key.width = grid::unit(0.01, "pt"),
+    legend.text = ggtext::element_markdown(size = 10),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0)
+  )
+
+prior_antibiotic_exposure
+
+ggsave(
+  here::here("fig_s1_files", "figure_S01b_prior_antibiotic_exposure_histogram.png"),
+  prior_antibiotic_exposure,
+  device = ragg::agg_png,
+  width = 2,
+  height = 2,
+  units = "in",
+  dpi = 600
+)
+```
+
+### Panel C: Longitudinal Patient vs Control Volcano Plots
+
+#### Differential Expression
 
 ```{r setUpFactors}
 # Set up factors ----------------------------------------------------------
+# Exclude the 35-EM patient. Comment this block out to include them.
+samples_without_35EM <- data$sampleData |>
+  tibble::rownames_to_column("sample_rowname") |>
+  dplyr::filter(
+    as.character(Subject_ID) != "201455",
+    !as.character(sample) %in% c("201455 T1", "201455 T2")
+  ) |>
+  dplyr::pull(sample_rowname)
+
+data$sampleData <- data$sampleData[samples_without_35EM, , drop = FALSE]
+data$assayData <- data$assayData[samples_without_35EM, , drop = FALSE]
+data$data <- data$data[samples_without_35EM, , drop = FALSE]
+data$directSymptoms <- data$directSymptoms[samples_without_35EM, , drop = FALSE]
+data$confoundingSymptoms <- data$confoundingSymptoms[samples_without_35EM, , drop = FALSE]
+data$emData <- data$emData[samples_without_35EM, , drop = FALSE]
+data$symptomData <- data$symptomData[samples_without_35EM, , drop = FALSE]
+data$treatmentData <- data$treatmentData[samples_without_35EM, , drop = FALSE]
+data$olinkNew <- data$olinkNew[samples_without_35EM, , drop = FALSE]
+data$olinkNewFail <- data$olinkNewFail[samples_without_35EM, , drop = FALSE]
+
+# Match the original Olink preprocessing used for the S1B-C volcano plots.
+Inflammation = data$assayData[, data$featureData$panel == "Inflammation"]
+ImmuneResponse = data$assayData[, data$featureData$panel == "ImmuneResponse"]
+Inflammation = Inflammation[apply(Inflammation, 1, function(x) sum(is.na(x)) == 0), ]
+ImmuneResponse = ImmuneResponse[apply(ImmuneResponse, 1, function(x) sum(is.na(x)) == 0), ]
+
+inf_batch = data$sampleData[rownames(Inflammation), "InflammationBatch"]
+ir_batch = data$sampleData[rownames(ImmuneResponse), "ImmuneResponseBatch"]
+
+mm1 = model.matrix(
+  ~ Condition:days_post_ab + Gender + Age_at_Time_of_Study_Entry,
+  data$sampleData[rownames(Inflammation), ]
+)
+mm2 = model.matrix(
+  ~ Condition:days_post_ab + Gender + Age_at_Time_of_Study_Entry,
+  data$sampleData[rownames(ImmuneResponse), ]
+)
+
+Inflammation = invisible(as.data.frame(t(sva::ComBat(t(Inflammation), inf_batch, mod = mm1))))
+ImmuneResponse = invisible(as.data.frame(t(sva::ComBat(t(ImmuneResponse), ir_batch))))
+
+data$assayData[rownames(Inflammation), colnames(Inflammation)] = Inflammation
+data$assayData[rownames(ImmuneResponse), colnames(ImmuneResponse)] = ImmuneResponse
+
+samples = gsub("_.$", "", rownames(data$assayData))
+duplicated = samples[duplicated(samples)]
+cat(duplicated, sep = ", ")
+data$assayData = aggregate(data$assayData, by = list(Name = samples), FUN = mean, na.remove = T)
+rownames(data$assayData) = gsub("_.$", "", data$assayData$Name)
+data$assayData = data$assayData[, -1]
+featureData = data$featureData
+data[!names(data) %in% c("featureData", "featureDataNew", "samples_to_remove")] = lapply(
+  data[!names(data) %in% c("featureData", "featureDataNew", "samples_to_remove")],
+  function(x) return(x[rownames(data$assayData), ])
+)
+data$featureData = featureData
+
+rm(
+  "duplicated", "featureData", "ImmuneResponse", "Inflammation",
+  "inf_batch", "ir_batch", "mm1", "mm2", "samples"
+)
+
 factors = data$sampleData[!is.na(data$sampleData$time), c("Subject_ID","time","days_post_ab")]
 colnames(factors) = c("Patient","Time","DaysPostAB")
 factors$Patient = as.factor(factors$Patient)
@@ -444,7 +743,9 @@ factors$serology = data$sampleData[rownames(factors),"T1_lyme_disease_result"]
 factors = cbind(factors,data$sampleData[rownames(factors),c("Systolic","Diastolic","Pulse","BMI")])
 ```
 
-### Patients vs. Controls Differential Expression
+#### Patients vs. Controls Differential Expression
+
+#### Volcano plots showing limma differential expression results
 
 ```{r limmaPatientsVsControls}
 #T1 naive v T1 AB v control limma~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -472,76 +773,104 @@ for(i in 1:length(contrasts)){
 }
 names(n_ab_controlList) = contrasts
 n_ab_controlList = n_ab_controlList[!grepl("serology|age|gender",names(n_ab_controlList))]
+
+# Plot params
+family = "sans"
+plot_text_size_pt = 8
+n_highlight = 5
+plot_title = element_text(hjust = 0.5, size = 10)
+plot_subtitle = element_text(hjust = .5, size = 10)
+
+thm = theme(
+  text = element_text(family = family, size = plot_text_size_pt),
+  axis.title = element_text(family = family, size = plot_text_size_pt),
+  axis.text = element_text(family = family, size = plot_text_size_pt),
+  strip.text = element_text(family = family, size = plot_text_size_pt),
+  legend.title = element_text(family = family, size = 6),
+  legend.text = element_text(family = family, size = 6),
+  plot.title = plot_title,
+  plot.subtitle = plot_subtitle
+)
+
 rm("conMat","contrasts",
    "fit","fit2","i","j","levels",
-   "mm")
+   "mm", "groups")
 ```
 
-```{r naiveTreatedControls, fig.height=3, fig.width=7.5, fig.cap = "Volcano plots showing limma differential expression results of AB naive and treated patients and controls at T1. The eight most significant proteins are labeled. Blue dots indicate proteins significant at p<0.05."}
 
-# Plot naive v AB v control volcano plots~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-limmaResult = n_ab_controlList[c("T1.p.TRUE-TC.c.TRUE", "T1.p.FALSE-TC.c.TRUE", "T1.p.TRUE-T1.p.FALSE")]
-names(limmaResult) = c("T1 - Controls vs. \nAB Naive", "T1 - Controls vs. \nAB Treated", "T1 - AB Treated vs. \nAB Naive")
-for(i in 1:length(limmaResult)){
-  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
-  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
-  limmaResult[[i]]$Protein = gsub("\\.", "", rownames(limmaResult[[i]]))
-  limmaResult[[i]]$rank = rank(limmaResult[[i]]$adj.P.Val, "min")
-}
-limmaResult = do.call(rbind, limmaResult)
-
-
-n_highlight = 5
-both = ggplot(limmaResult, aes(x = logFC, y = -log10(adj.P.Val), color = adj.P.Val < .05)) + 
-  geom_point(size = 5) + 
-  geom_text_repel(aes(x = logFC, y = -log10(adj.P.Val), label = ifelse(rank <= n_highlight, Protein, "")), color = 'black', size = 8) +
-  facet_grid(cols = vars(ID)) + 
-  guides(color = guide_legend(title="p < 0.05")) + 
-  xlab("log2 fold change") + 
-  ylab("-log10 adjusted p value") + 
-  # ggtitle("Differential Expression at T1") +
-  theme_minimal(base_size = 40)
-# both
-# 
-# png("./figures_final/Olink/Volcano Controls AB Naive and Treated.png",width=550*3,height=250*3)
-# both
-# dev.off()
-# 
-# # Number of DEPs at diagnosis
-# sum(limmaResult$adj.P.Val[limmaResult$ID=="T1 - Controls vs. \nAB Naive"]>0.05)
-# 
-# rm(both)
-
-both
-```
-
-```{r naiveVsControls, fig.height=3, fig.width=7.5,fig.cap = "Volcano plots showing limma differential expression results of AB naive patients and controls at T1-4. The eight most significant proteins are labeled. Blue dots indicate proteins significant at p<0.05."}
+```{r figureS1c_naive_control_volcano, fig.height=3, fig.width=7.5,fig.cap = "Volcano plots showing limma differential expression results of AB naive patients and controls at T1-4. The eight most significant proteins are labeled. Blue dots indicate proteins significant at p<0.05."}
 comps = c("T1.p.TRUE-TC.c.TRUE","T2.p.TRUE-TC.c.TRUE","T3.p.TRUE-TC.c.TRUE","T4.p.TRUE-TC.c.TRUE")
 limmaResult = n_ab_controlList[comps]
-names(limmaResult) = c("T1 - Controls \nvs. Patients",
-                       "T2 - Controls \nvs. Patients",
-                       "T3 - Controls \nvs. Patients",
-                       "T4 - Controls \nvs. Patients")
+names(limmaResult) = c("T1", "T2", "T3", "T4")
 for(i in 1:length(limmaResult)){
-  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
   limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
   limmaResult[[i]]$Protein = gsub("\\.", "", rownames(limmaResult[[i]]))
   limmaResult[[i]]$rank = rank(limmaResult[[i]]$adj.P.Val, "min")
 }
-limmaResult = limmaResult[c("T1 - Controls \nvs. Patients",
-                            "T2 - Controls \nvs. Patients",
-                            "T3 - Controls \nvs. Patients",
-                            "T4 - Controls \nvs. Patients")]
+limmaResult = limmaResult[c("T1", "T2", "T3", "T4")]
 groupedDE = limmaResult
 limmaResult = do.call(rbind, limmaResult)
-n_highlight = 5
+limmaLabels = limmaResult |>
+  dplyr::filter(rank <= n_highlight, adj.P.Val < 0.05)
 naive = ggplot(limmaResult, aes(x = logFC, y = -log10(adj.P.Val), color = adj.P.Val < .05)) + 
-  geom_point(size = 5) + 
-  geom_text_repel(aes(x = logFC, y = -log10(adj.P.Val), label = ifelse(rank <= n_highlight, Protein, "")), color = 'black', size = 8) +
+  geom_point(size = 0.3) + 
+  geom_text_repel(
+    data = limmaLabels,
+    aes(
+      x = logFC,
+      y = -log10(adj.P.Val),
+      label = Protein,
+      hjust = ifelse(logFC >= 0, 1, 0)
+    ),
+    color = "black",
+    size = 5.5 / ggplot2::.pt,
+    segment.color = "grey35",
+    segment.size = 0.2,
+    segment.alpha = 0.6,
+    min.segment.length = 0,
+    box.padding = 0.2,
+    point.padding = 0.2,
+    nudge_x = ifelse(limmaLabels$logFC >= 0, -0.6, 0.6),
+    nudge_y = 0.3,
+    direction = "y",
+    force = 5,
+    force_pull = 0.1,
+    max.time = 5,
+    max.iter = 50000,
+    max.overlaps = Inf,
+    seed = 123,
+    show.legend = FALSE
+  ) +
   facet_grid(cols = vars(ID)) + 
-  guides(color = guide_legend(title="p < 0.05")) + 
-  xlab("log2 fold change") + ylab("-log10 adjusted p value") + #ggtitle("Antibiotic Naive Patients vs. Controls") +
-  theme_minimal(base_size = 40)
+  guides(color = guide_legend(
+    title = "p < 0.05",
+    title.position = "top",
+    title.hjust = 0.5
+  )) + 
+  xlab("log2 fold change") +
+  ylab("-log10 adjusted p value") +
+  coord_cartesian(xlim = c(-1, 2)) +
+  ggtitle("Abx-naive patients vs. controls") +
+  theme_minimal() +
+  thm +
+  theme(
+    strip.text = element_text(size = 9),
+    legend.title = element_text(hjust = 0.5, margin = margin(b = 1)),
+    legend.text = element_text(size = 6, margin = margin(l = 1)),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(0, "pt"),
+    legend.spacing.x = unit(0, "pt"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.key = element_blank(),
+    legend.key.height = unit(5, "pt"),
+    legend.key.width = unit(5, "pt"),
+    legend.position = c(0.95, 0.85),
+    legend.justification = c(0.5, 0.5),
+    legend.background = element_rect(fill = "grey90", color = NA),
+    legend.box.background = element_rect(fill = "grey90", color = NA),
+    plot.margin = margin(0, r=1, 0, 0)
+  )
 # naive
 # 
 # png("./figures_final/Olink/Volcano Controls vs AB Naive.png",width=550*3,height=250*3)
@@ -550,39 +879,179 @@ naive = ggplot(limmaResult, aes(x = logFC, y = -log10(adj.P.Val), color = adj.P.
 # rm(naive,n_highlight)
 
 naive
+
+ggsave(
+  here::here("fig_s1_files", "figure_S01c_abx_naive_patient_control_volcano.png"),
+  naive,
+  device = ragg::agg_png,
+  width = 4,
+  height = 1.9,
+  units = "in",
+  dpi = 600
+)
 ```
 
-### Spaghetti plots
+### Panel D: Naive, Treated, and Control Volcano Plots
+```{r figureS1d_naive_treated_control_volcano, fig.height=3, fig.width=7.5, fig.cap = "Volcano plots showing limma differential expression results of AB naive and treated patients and controls at T1. The eight most significant proteins are labeled. Blue dots indicate proteins significant at p<0.05."}
 
-```{r spaghettiPlots, fig.height=2, fig.width=3, fig.cap = "Spaghetti plot showing patient trajectories for the protein LAMP3."}
-dat = data$data[data$data$Condition=="Patient",]
-p = ggplot(dat, aes(x = days_post_ab, y = `LAMP3`, group = Subject_ID, color = gg_color_hue(1))) + 
-  geom_line(show.legend = FALSE)+
-  xlab("Days Post Antibiotics")+
-  xlim(c(0,400))+
-  theme(text = element_text(family = 'sans')) + 
-  theme_minimal(base_size = 26)
-p
+# Plot naive v AB v control volcano plots~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+limmaResult = n_ab_controlList[c("T1.p.TRUE-TC.c.TRUE", "T1.p.FALSE-TC.c.TRUE", "T1.p.TRUE-T1.p.FALSE")]
+names(limmaResult) = c(
+  "T1 Abx-naive\nvs. controls",
+  "T1 Abx non-naive\nvs. controls",
+  "T1 Abx-naive\nvs. Abx non-naive"
+)
+for(i in 1:length(limmaResult)){
+  limmaResult[[i]]$ID = rep(names(limmaResult)[i], nrow(limmaResult[[i]]))
+  limmaResult[[i]]$Protein = gsub("\\.", "", rownames(limmaResult[[i]]))
+  limmaResult[[i]]$rank = rank(limmaResult[[i]]$adj.P.Val, "min")
+}
+limmaResult = do.call(rbind, limmaResult)
+limmaLabels = limmaResult |>
+  dplyr::filter(rank <= n_highlight, adj.P.Val < 0.05)
+
+
+both = ggplot(limmaResult, aes(x = logFC, y = -log10(adj.P.Val), color = adj.P.Val < .05)) + 
+  geom_point(size = 0.3) + 
+  geom_text_repel(
+    data = limmaLabels,
+    aes(
+      x = logFC,
+      y = -log10(adj.P.Val),
+      label = Protein,
+      hjust = ifelse(logFC >= 0, 1, 0)
+    ),
+    color = "black",
+    size = 5.5 / ggplot2::.pt,
+    segment.color = "grey35",
+    segment.size = 0.2,
+    segment.alpha = 0.6,
+    min.segment.length = 0,
+    box.padding = 0.2,
+    point.padding = 0.2,
+    nudge_x = ifelse(limmaLabels$logFC >= 0, -0.6, 0.6),
+    nudge_y = 0.3,
+    direction = "y",
+    force = 5,
+    force_pull = 0.1,
+    max.time = 5,
+    max.iter = 50000,
+    max.overlaps = Inf,
+    seed = 123,
+    show.legend = FALSE
+  ) +
+  facet_grid(cols = vars(ID)) + 
+  guides(color = guide_legend(
+    title = "p < 0.05",
+    title.position = "top",
+    title.hjust = 0.5
+  )) + 
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p value") + 
+  coord_cartesian(xlim = c(-1, 2)) +
+  theme_minimal() +
+  thm +
+  theme(
+    strip.text = element_text(size = 9),
+    legend.title = element_text(hjust = 0.5, margin = margin(b = 1)),
+    legend.text = element_text(size = 6, margin = margin(l = 1)),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(0, "pt"),
+    legend.spacing.x = unit(0, "pt"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.key = element_blank(),
+    legend.key.height = unit(5, "pt"),
+    legend.key.width = unit(5, "pt"),
+    legend.position = c(0.95, 0.20),
+    legend.justification = c(0.5, 0.5),
+    legend.background = element_rect(fill = "grey90", color = NA),
+    legend.box.background = element_rect(fill = "grey90", color = NA),
+    plot.margin = margin(0, r=1, 0, 0)
+  )
+# both
+# 
+# png("./figures_final/Olink/Volcano Controls AB Naive and Treated.png",width=550*3,height=250*3)
+# both
+# dev.off()
+# 
+# # Number of DEPs at diagnosis
+# sum(limmaResult$adj.P.Val[limmaResult$ID=="T1 - AB Naive \nvs. Controls"]>0.05)
+# 
+# rm(both)
+
+both
+
+ggsave(
+  here::here("fig_s1_files", "figure_S01d_abx_naive_treated_control_volcano.png"),
+  both,
+  device = ragg::agg_png,
+  width = 4,
+  height = 1.9,
+  units = "in",
+  dpi = 600
+)
 ```
 
-### Pair-wise comparisons
+### Panel E: Longitudinal Protein Spaghetti Plot
+```{r figureS1e_LAMP3_spaghetti}
 
-```{r pairWiseLimma}
-vars = ls()
-#Differential Expression ~~~~~~~~~~~~~~~~~~~~~~~~
-times = c("T1","T2","T3","T4")
+dat <- data$data |>
+  filter(
+    Condition == "Patient",
+    is.finite(days_post_ab),
+    is.finite(LAMP3)
+  )
+
+LAMP3_spaghetti <- dat |>
+  ggplot(aes(
+    x = days_post_ab,
+    y = `LAMP3`,
+    group = Subject_ID,
+    color = gg_color_hue(1)
+  )) +
+  geom_line(show.legend = FALSE, linewidth = 0.2) +
+  xlab("Days post enrollment") +
+  scale_y_continuous(breaks = c(0, 1, 2, 3)) +
+  coord_cartesian(xlim = c(0, 400)) +
+  theme_minimal(base_size = 10)
+
+figureS1e <- here::here("fig_s1_files", "figure_S01e_lamp3_longitudinal_trajectory.png")
+
+ragg::agg_png(
+  filename = figureS1e,
+  width = 2.83,
+  height = 1.75,
+  units = "in",
+  res = 600,
+  scaling = 1
+)
+
+print(LAMP3_spaghetti)
+
+grDevices::dev.off() |> invisible()
+
+knitr::include_graphics(figureS1e)
+```
+
+### Panel F: Representative Slow and Fast Trajectory Line Plots
+```{r figureS1f_slow_fast_lines}
+
+# Uses the preprocessed data and factors from setUpFactors above. That chunk
+# applies the original Olink preprocessing and the 35-EM exclusion.
+
+times = c("T1", "T2", "T3", "T4")
 timeComps = list()
-for(i in 1:length(times)){
-  for(j in 1:length(times)){
-    if(i!=j&i<j){
-      timeComps[[length(timeComps)+1]] = c(times[i],times[j])
-      names(timeComps)[length(timeComps)] = paste0(times[i],"-",times[j])
+for (i in 1:length(times)) {
+  for (j in 1:length(times)) {
+    if (i != j & i < j) {
+      timeComps[[length(timeComps) + 1]] = c(times[i], times[j])
+      names(timeComps)[length(timeComps)] = paste0(times[i], "-", times[j])
     }
   }
 }
 
 proteins = colnames(data$assayData)
-
 pFrame = data.frame(proteins = proteins)
 adj_pFrame = data.frame(proteins = proteins)
 logFCFrame = data.frame(proteins = proteins)
@@ -591,166 +1060,542 @@ rownames(pFrame) = proteins
 rownames(adj_pFrame) = proteins
 rownames(logFCFrame) = proteins
 
-de_list = list()
-fit_list = list()
-
-for(i in 1:length(timeComps)){
+for (i in 1:length(timeComps)) {
   comparison = timeComps[[i]]
-  naive = c(TRUE)
-  type = c("p")
-  
-  factorSub = factors[factors$Type%in%type&factors$Time%in%comparison&factors$naive%in%naive,]
-  factorSub = lapply(factorSub,FUN = factor)
-  ids = paste0(factorSub$Patient," ",factorSub$Time)
-  
+  factorSub = factors[factors$Type %in% "p" &
+    factors$Time %in% comparison &
+    factors$naive %in% TRUE, ]
+  factorSub = lapply(factorSub, FUN = factor)
+  ids = paste0(factorSub$Patient, " ", factorSub$Time)
+
   patient = factorSub$Patient
   time = factorSub$Time
-  naive = factorSub$naive
-  type = factorSub$Type
-  daysPostAB = factorSub$DaysPostAB
-  age = data$sampleData[ids,"Age_at_Time_of_Study_Entry"]
-  sero = data$sampleData[ids,"T1_lyme_disease_result"]
-  gender = data$sampleData[ids,"Gender"]
-  
-  # if(!"T2"%in%comparison){
-  #   systolic = data$sampleData[ids,"Sytolic"]
-  #   diastolic = data$sampleData[ids,"Diastolic"]
-  #   pulse = data$sampleData[ids,"Pulse"]
-  #   bmi = data$sampleData[ids,"BMI"]
-  #   
-  #   mm = model.matrix(~0+patient+time+age+sero+gender+systolic+diastolic+pulse+bmi)
-  # }else{
-  mm = model.matrix(~0+patient+time+age+sero+gender)
-  # }
-  
-  fit <- lmFit(t(data$assayData[paste0(as.character(patient)," ",as.character(time)),]),mm)
+  age = data$sampleData[ids, "Age_at_Time_of_Study_Entry"]
+  sero = data$sampleData[ids, "T1_lyme_disease_result"]
+  gender = data$sampleData[ids, "Gender"]
+
+  mm = model.matrix(~0 + patient + time + age + sero + gender)
+  fit <- lmFit(t(data$assayData[paste0(as.character(patient), " ", as.character(time)), ]), mm)
   fit <- eBayes(fit)
-  
-  fit_list[[i]] = fit
-  
-  top = limma::topTable(fit, coef=paste0("time",comparison[2]),number = Inf)
-  
-  de_list[[i]] = top
-  
-  top = top[proteins,]
-  
-  pFrame[,names(timeComps)[i]] = top$P.Val
-  adj_pFrame[,names(timeComps)[i]] = top$adj.P.Val
-  logFCFrame[,names(timeComps)[i]] = top$logFC
+
+  top = topTable(fit, coef = paste0("time", comparison[2]), number = Inf)
+  top = top[proteins, ]
+
+  pFrame[, names(timeComps)[i]] = top$P.Value
+  adj_pFrame[, names(timeComps)[i]] = top$adj.P.Val
+  logFCFrame[, names(timeComps)[i]] = top$logFC
 }
-names(de_list) = unlist(lapply(timeComps, paste, collapse = "-"))
-names(fit_list) = unlist(lapply(timeComps, paste, collapse = "-"))
 
-#Clean up differential expression results ~~~~~~~
-
-logFCFrame = logFCFrame[,-1]
-pFrame = pFrame[,-1]
-adj_pFrame = adj_pFrame[,-1]
+logFCFrame = logFCFrame[, -1]
+pFrame = pFrame[, -1]
+adj_pFrame = adj_pFrame[, -1]
 pairwise = list(logFC = logFCFrame, p = pFrame, p.adj = adj_pFrame)
-logFCFrame = logFCFrame[!apply(adj_pFrame,MARGIN = 1,function(x) sum(x<.05) == 0),]
-logFCFrame = logFCFrame[order(rowSums(logFCFrame,na.rm = T),decreasing = T),]
+
+logFCFrame = logFCFrame[!apply(adj_pFrame, MARGIN = 1, function(x) sum(x < .05) == 0), ]
+logFCFrame = logFCFrame[order(rowSums(logFCFrame, na.rm = T), decreasing = T), ]
 adj_pFrame = adj_pFrame[rownames(logFCFrame), colnames(logFCFrame)]
 rownames(logFCFrame) = gsub("\\.", " ", rownames(logFCFrame))
 rownames(adj_pFrame) = gsub("\\.", " ", rownames(adj_pFrame))
-panel = data$featureData$panel[match(rownames(logFCFrame),data$featureData$protein)]
 rownames(logFCFrame) = make.unique(fixNames(rownames(logFCFrame)))
 rownames(adj_pFrame) = make.unique(fixNames(rownames(adj_pFrame)))
-```
 
-### Pairwise DE Heatmap
-
-```{r plotPairwiseDE, fig.height=7.5, fig.width=3, fig.cap = "Heatmap showing pairwise differential expression results of protein values in antibiotic naive patients at the indicated time points. Color indicates logFC, and grey cells indicate no significance. Differential expression was calculated using the R package limma."}
-# Plot Ven Diagram ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# upset(data = fromList(apply(pairwise$p,2,function(x)rownames(pairwise$p)[x<=0.05])), order.by = "freq")
-
-# Plot Heatmap ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-col_fun = circlize::colorRamp2(c(-1.5, 0, 1.5), c("blue", "white","red"))
-
-cell_fun = function(j, i, x, y, width, height, fill) {
-  txt = returnSigStars(adj_pFrame[i, j])
-  if(txt=="ns")txt = ""
-  grid.text(txt, x, y, gp = gpar(fontsize = 32),vjust=.8)
-}
-hc1 = hclust(dist(-1*logFCFrame),method = "ward.D2")
-infimm_clust = paste0("c",cutree(hc1,2))
-infimm_clust[infimm_clust=="c1"] = 'fast'
-infimm_clust[infimm_clust=="c2"] = 'slow'
+hc1 = hclust(dist(-1 * logFCFrame), method = "ward.D2")
+infimm_clust = paste0("c", cutree(hc1, 2))
+infimm_clust[infimm_clust == "c1"] = "fast"
+infimm_clust[infimm_clust == "c2"] = "slow"
 names(infimm_clust) = rownames(logFCFrame)
-pairwise$cluster = rep("none",nrow(pairwise$logFC))
+
+pairwise$cluster = setNames(rep("none", nrow(pairwise$logFC)), rownames(pairwise$logFC))
 pairwise$cluster[names(infimm_clust)] = infimm_clust
-rowanno = rowAnnotation(cluster = infimm_clust,
-                        col=list(cluster=c(fast="#F8766D",slow="#00BFC4")),
-                        annotation_name_gp = gpar(fontsize=32),
-                        # width = unit(5000,"cm"),
-                        simple_anno_size = unit(1,"cm"),
-                        annotation_legend_param = list(legend_width=unit(10,"cm"),
-                                                       labels_gp=gpar(fontsize=32),
-                                                       grid_height = unit(15, "mm"),
-                                                       grid_width = unit(15, "mm"),
-                                                       title_gap = unit(30, "mm"),
-                                                       title_position = "topcenter",
-                                                       title_gp = gpar(fontsize = 32, fontface = "bold")))
-hm = Heatmap(matrix = -1*logFCFrame,
-             cluster_columns = F,
-             cell_fun = cell_fun,
-             col = col_fun,
-             cluster_rows = hc1,
-             left_annotation = rowanno,
-             row_names_gp = gpar(fontsize=24),
-             column_names_gp = gpar(fontsize=32),
-             heatmap_legend_param = list(title="logFC",legend_height=unit(10,"cm"),
-                                         title_gap = unit(300, "mm"),
-                                         legend_height=unit(5,"mm"),
-                                         legend_width=unit(80,"mm"),
-                                         legend_direction = "horizontal",
-                                         labels_gp=gpar(fontsize=32),
-                                         grid_height = unit(5, "mm"),
-                                         grid_width = unit(80, "mm"),
-                                         title_position = "topcenter",
-                                         title_gp = gpar(fontsize = 32, fontface = "bold")),
-             name = "logFC")
-hm = ComplexHeatmap::draw(hm,padding=unit(c(1, 1, 1, 1.5), "cm"),heatmap_legend_side="bottom")
-# hm
-# png("./figures_final/Olink/Pairwise DE Heatmap.png",width = 250*3,height=800*3)
-# hm
-# dev.off()
-# 
-# rm("hm","hc1","infimm_clust","rowanno","mm")
-```
 
-### Representative line plots
+topFast = c("CXCL10", "SIRT2", "CCL20")
+topSlow = c("DAPP1", "SH2B3", "EIF4G1")
 
-```{r, fig.width = 4,fig.height = 5}
-topSlow = names(pairwise$cluster)[pairwise$cluster=="slow"][order(pairwise$logFC[names(pairwise$cluster)[pairwise$cluster=="slow"],"T1-T4"])][c(2,3,5)]
-topFast = names(pairwise$cluster)[pairwise$cluster=="fast"][order(pairwise$logFC[names(pairwise$cluster)[pairwise$cluster=="fast"],"T1-T2"])][c(1,4,5)]
+dat = data$assayData[
+  data$sampleData$Condition == "Patient" & data$sampleData$days_of_prior_antibiotics == 0,
+  c(topFast, topSlow)
+]
 
-dat = data$assayData[data$sampleData$Condition=="Patient"&data$sampleData$days_of_prior_antibiotics==0,c(topFast,topSlow)]
-
-dat = cbind(data$sampleData[rownames(dat),c("Subject_ID","days_post_ab","time")],dat)
-dat_long = pivot_longer(dat,cols = 4:ncol(dat),names_to = 'protein',values_to = 'value')
+dat = cbind(data$sampleData[rownames(dat), c("Subject_ID", "days_post_ab", "time")], dat)
+dat_long = pivot_longer(dat, cols = 4:ncol(dat), names_to = "protein", values_to = "value")
 dat_long$protein = fixNames(dat_long$protein)
-dat_long$protein = factor(dat_long$protein,levels = c(topFast,topSlow))
-dat_long$cluster = rep("no clust",nrow(dat_long))
-dat_long$cluster[dat_long$protein%in%names(pairwise$cluster)[pairwise$cluster=="fast"]] = "Fast Resolving"
-dat_long$cluster[dat_long$protein%in%names(pairwise$cluster)[pairwise$cluster=="slow"]] = "Slow Resolving"
-dat_long$SubProt = paste0(dat_long$Subject_ID," - ",dat_long$protein)
-# dat_long$days_post_ab
-dat_long$cluster = factor(dat_long$cluster,levels = c("Fast Resolving","Slow Resolving"))
+dat_long$protein = factor(dat_long$protein, levels = c(topFast, topSlow))
+dat_long$cluster = rep("no clust", nrow(dat_long))
+dat_long$cluster[dat_long$protein %in% topFast] = "Fast Resolving"
+dat_long$cluster[dat_long$protein %in% topSlow] = "Slow Resolving"
+dat_long$SubProt = paste0(dat_long$Subject_ID, " - ", dat_long$protein)
+dat_long$cluster = factor(dat_long$cluster, levels = c("Fast Resolving", "Slow Resolving"))
 
-p = ggplot(dat_long, aes(x=days_post_ab,y = value,fill = cluster))+
-  # geom_boxplot()+
-  geom_smooth(size=2)+
-  # scale_fill_manual(values=gg_color_hue(2)[2:1])+
-  facet_wrap(~protein,scales = 'free_y')+
-  xlim(0,400)+
-  theme_minimal(base_size = 50)+
-  xlab('Days Post Antibiotics')
-p
+slow_fast_lines <- ggplot(dat_long, aes(x = days_post_ab, y = value, fill = cluster)) +
+  geom_smooth(linewidth = 0.5) +
+  facet_wrap(~protein, scales = "free_y") +
+  xlim(0, 400) +
+  theme_minimal(base_size = 10) +
+  xlab("Days post antibiotics") +
+  ylab("NPX value") +
+theme(
+  axis.title = element_text(size = 10),
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8, margin = margin(r = -3)),
+  strip.text = element_text(size = 8),
+  legend.text = element_text(size = 10),
+  legend.position = "bottom",
+  legend.title = element_blank()
+)
 
-# png("./figures_final/Olink/Slow Fast Line Plots.png",width = 750*3,height = 450*3)
-# p
-# dev.off()
-# 
-# rm("p","dat_long","dat")
+slow_fast_lines
+
+ggsave(
+  here::here("fig_s1_files", "figure_S01f_fast_slow_protein_loess_trajectories.png"),
+  slow_fast_lines,
+  device = ragg::agg_png,
+  width = 3.8,
+  height = 3.8,
+  units = "in",
+  dpi = 300
+)
 ```
+
+### Panel G: Olink ROC Curves
+```{r figureS1g_olink_roc}
+# Uses the 35-EM-excluded, ComBat-corrected, duplicate-collapsed Olink data
+# created in setUpFactors above.
+seed <- 123
+set.seed(seed)
+relax <- TRUE
+alpha <- 1
+prop_out <- 0.2
+n_fold_lambda <- 5
+n_sim <- 500
+timepoints <- c("T1", "T2", "T3", "T4")
+
+panel_g_cache <- here::here(
+  "data",
+  "intermediate",
+  "04_integrative_modeling",
+  "figureS1g_olink_lasso_roc_no35EM.RData"
+)
+
+run_panel_g_simulations <- FALSE
+# Uncomment the next line to regenerate the 500-simulation intermediate object.
+# run_panel_g_simulations <- TRUE
+
+if (!run_panel_g_simulations && file.exists(panel_g_cache)) {
+  load(panel_g_cache)
+} else if (!run_panel_g_simulations) {
+  stop(
+    "Missing Panel G intermediate object: ",
+    panel_g_cache,
+    "\nUncomment `run_panel_g_simulations <- TRUE` in this chunk to regenerate it."
+  )
+} else {
+sample_data <- data$sampleData
+assay_data <- data$assayData
+
+keep_train_test <- (
+  (sample_data$time %in% c("T1", "T2") & sample_data$days_of_prior_antibiotics < 1) |
+    (!sample_data$time %in% c("T1", "T2"))
+) &
+  !is.na(sample_data$Condition) &
+  apply(data$assayData, 1, function(x) sum(is.na(x)) == 0)
+
+d <- assay_data[keep_train_test, , drop = FALSE]
+sd <- sample_data[keep_train_test, , drop = FALSE]
+class <- ifelse(sd$Condition == "Patient", 1, 0)
+
+dList <- split(d, sd$time)
+classList <- split(class, sd$time)
+dList <- dList[timepoints]
+classList <- classList[timepoints]
+
+# Original script adds T1 controls to the T2 classifier.
+dList$T2 <- rbind(dList$T2, dList$T1[classList$T1 == 0, , drop = FALSE])
+classList$T2 <- c(classList$T2, classList$T1[classList$T1 == 0])
+
+modelRes <- list()
+modelData <- list()
+
+for (timepoint in timepoints) {
+  message("Fitting train/test ", timepoint, " model")
+  d_j <- dList[[timepoint]]
+  class_j <- classList[[timepoint]]
+
+  modelData[[timepoint]] <- list(
+    d = d_j,
+    class = class_j,
+    seed = seed,
+    relax = relax,
+    alpha = alpha,
+    prop_out = prop_out,
+    n_fold_lambda = n_fold_lambda,
+    n_sim = n_sim
+  )
+
+  pb <- progress::progress_bar$new(
+    total = n_sim,
+    format = "  running model [:bar] :percent eta: :eta",
+    clear = FALSE,
+    width = 60
+  )
+
+  modelList <- list()
+  for (i in seq_len(n_sim)) {
+    training.samples <- as.numeric(caret::createDataPartition(
+      y = as.factor(class_j[seq_len(nrow(d_j))]),
+      p = 1 - prop_out,
+      list = FALSE
+    ))
+
+    train.data <- as.matrix(d_j[training.samples, , drop = FALSE])
+    train.response <- class_j[training.samples]
+
+    model <- glmnet::cv.glmnet(
+      x = train.data,
+      y = train.response,
+      alpha = alpha,
+      family = "binomial",
+      type.measure = "auc",
+      keep = TRUE,
+      relax = relax,
+      nfolds = n_fold_lambda
+    )
+
+    modelList[[i]] <- list(model = model, training.samples = training.samples)
+    pb$tick()
+  }
+
+  modelRes[[timepoint]] <- modelList
+}
+
+set.seed(seed)
+
+keep_full <- (
+  (sample_data$time == "T1" & sample_data$days_of_prior_antibiotics < 1) |
+    (sample_data$time != "T1")
+) &
+  !is.na(sample_data$Condition) &
+  apply(data$assayData, 1, function(x) sum(is.na(x)) == 0)
+
+d_full <- assay_data[keep_full, , drop = FALSE]
+sd_full <- sample_data[keep_full, , drop = FALSE]
+class_full <- ifelse(sd_full$Condition == "Patient", 1, 0)
+
+dList_full <- split(d_full, sd_full$time)
+classList_full <- split(class_full, sd_full$time)
+dList_full <- dList_full[timepoints]
+classList_full <- classList_full[timepoints]
+
+dList_full$T2 <- rbind(dList_full$T2, dList_full$T1[classList_full$T1 == 0, , drop = FALSE])
+classList_full$T2 <- c(classList_full$T2, classList_full$T1[classList_full$T1 == 0])
+
+modelRes_full <- list()
+modelData_full <- list()
+
+for (timepoint in timepoints) {
+  message("Fitting full-data ", timepoint, " model")
+  d_j <- dList_full[[timepoint]]
+  class_j <- classList_full[[timepoint]]
+
+  modelData_full[[timepoint]] <- list(
+    d = d_j,
+    class = class_j,
+    seed = seed,
+    relax = relax,
+    alpha = alpha,
+    prop_out = prop_out,
+    n_fold_lambda = n_fold_lambda,
+    n_sim = n_sim
+  )
+
+  model <- glmnet::cv.glmnet(
+    x = as.matrix(d_j),
+    y = class_j,
+    alpha = alpha,
+    family = "binomial",
+    type.measure = "auc",
+    keep = TRUE,
+    relax = relax,
+    nfolds = n_fold_lambda
+  )
+
+  modelRes_full[[timepoint]] <- list(model = model, training.samples = seq_len(nrow(d_j)))
+}
+
+auc <- list()
+roc <- list()
+roc_train <- list()
+avg_roc <- list()
+avg_roc_train <- list()
+
+for (timepoint in timepoints) {
+  d_i <- modelData[[timepoint]]$d
+  class_i <- modelData[[timepoint]]$class
+  modelList <- modelRes[[timepoint]]
+
+  rocList_train <- lapply(modelList, function(x) {
+    glmnet::roc.glmnet(
+      x$model,
+      newx = as.matrix(d_i[x$training.samples, , drop = FALSE]),
+      newy = as.numeric(class_i[x$training.samples]),
+      s = "lambda.min"
+    )
+  })
+
+  rocFrame_train <- lapply(seq_along(rocList_train), function(k) {
+    cbind(rocList_train[[k]], rep(paste0("m", k), nrow(rocList_train[[k]])))
+  })
+  rocFrame_train <- as.data.frame(do.call(rbind, rocFrame_train))
+  colnames(rocFrame_train) <- c("FPR", "TPR", "Model")
+
+  fpr_train <- sort(unique(rocFrame_train$FPR))
+  avg_train <- sapply(rocList_train, function(x) {
+    approx(x[, 1], x[, 2], rule = 2, fpr_train, "constant", f = 0)$y
+  })
+  avg_train <- data.frame(FPR = fpr_train, TPR = rowMeans(avg_train))
+  avg_train <- rbind(c(0, 0), avg_train, c(1, 1))
+  rocFrame_train$ID <- timepoint
+  avg_train$ID <- timepoint
+
+  rocList <- lapply(modelList, function(x) {
+    glmnet::roc.glmnet(
+      x$model,
+      newx = as.matrix(d_i[-x$training.samples, , drop = FALSE]),
+      newy = as.numeric(class_i[-x$training.samples]),
+      s = "lambda.min"
+    )
+  })
+
+  rocFrame <- lapply(seq_along(rocList), function(k) {
+    cbind(rocList[[k]], rep(paste0("m", k), nrow(rocList[[k]])))
+  })
+  rocFrame <- as.data.frame(do.call(rbind, rocFrame))
+  colnames(rocFrame) <- c("FPR", "TPR", "Model")
+
+  fpr <- sort(unique(rocFrame$FPR))
+  avg <- sapply(rocList, function(x) {
+    approx(x[, 1], x[, 2], rule = 2, fpr, "constant", f = 0)$y
+  })
+  avg <- data.frame(FPR = fpr, TPR = rowMeans(avg))
+  avg <- rbind(c(0, 0), avg, c(1, 1))
+  rocFrame$ID <- timepoint
+  avg$ID <- timepoint
+
+  auc[[timepoint]] <- data.frame(
+    train = sapply(modelList, function(x) {
+      glmnet::assess.glmnet(
+        x$model,
+        newx = as.matrix(d_i[x$training.samples, , drop = FALSE]),
+        newy = as.numeric(class_i[x$training.samples]),
+        s = "lambda.min"
+      )$auc
+    }),
+    test = sapply(modelList, function(x) {
+      glmnet::assess.glmnet(
+        x$model,
+        newx = as.matrix(d_i[-x$training.samples, , drop = FALSE]),
+        newy = as.numeric(class_i[-x$training.samples]),
+        s = "lambda.min"
+      )$auc
+    })
+  )
+
+  roc[[timepoint]] <- rocFrame
+  roc_train[[timepoint]] <- rocFrame_train
+  avg_roc[[timepoint]] <- avg
+  avg_roc_train[[timepoint]] <- avg_train
+}
+
+roc <- do.call(rbind, roc)
+roc_train <- do.call(rbind, roc_train)
+avg_roc <- do.call(rbind, avg_roc)
+avg_roc_train <- do.call(rbind, avg_roc_train)
+auc <- do.call(rbind, auc)
+
+auc_summary <- auc |>
+  tibble::rownames_to_column("auc_row") |>
+  dplyr::mutate(ID = sub("\\..*$", "", auc_row)) |>
+  dplyr::group_by(ID) |>
+  dplyr::summarise(
+    train_auc = mean(train, na.rm = TRUE),
+    test_auc = mean(test, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+labels <- auc_summary |>
+  dplyr::transmute(
+    ID,
+    mean_auc = paste0("Mean AUC Test = ", sprintf("%.2f", test_auc))
+  )
+
+labels_train <- auc_summary |>
+  dplyr::transmute(
+    ID,
+    mean_auc = paste0("Mean AUC Train = ", sprintf("%.2f", train_auc))
+  )
+
+avg_roc$type <- "Test"
+avg_roc_train$type <- "Train"
+
+roc_full <- lapply(timepoints, function(timepoint) {
+  roc <- glmnet::roc.glmnet(
+    modelRes_full[[timepoint]]$model,
+    newx = as.matrix(modelData_full[[timepoint]]$d),
+    newy = modelData_full[[timepoint]]$class,
+    s = "lambda.min"
+  )
+  roc$ID <- timepoint
+  roc$type <- "Full"
+  roc
+})
+roc_full <- do.call(rbind, roc_full)
+
+auc_full <- sapply(timepoints, function(timepoint) {
+  glmnet::assess.glmnet(
+    modelRes_full[[timepoint]]$model,
+    newx = as.matrix(modelData_full[[timepoint]]$d),
+    newy = modelData_full[[timepoint]]$class,
+    s = "lambda.min"
+  )$auc
+})
+
+labels_full <- data.frame(
+  ID = timepoints,
+  full_auc = paste0("AUC Full = ", sprintf("%.2f", auc_full))
+)
+
+roc_plot <- rbind(avg_roc, avg_roc_train, roc_full)
+
+sample_ids_used <- rownames(sample_data)
+feature_names_used <- colnames(assay_data)
+exclude_35EM <- TRUE
+
+dir.create(dirname(panel_g_cache), recursive = TRUE, showWarnings = FALSE)
+save(
+  roc_plot,
+  labels,
+  labels_train,
+  labels_full,
+  auc,
+  auc_full,
+  timepoints,
+  seed,
+  n_sim,
+  alpha,
+  relax,
+  prop_out,
+  n_fold_lambda,
+  sample_ids_used,
+  feature_names_used,
+  exclude_35EM,
+  file = panel_g_cache
+)
+
+# Uncomment to also save the full fitted model objects. This file can be large.
+# save(
+#   modelRes,
+#   modelData,
+#   modelRes_full,
+#   modelData_full,
+#   file = here::here(
+#     "data",
+#     "intermediate",
+#     "04_integrative_modeling",
+#     "figureS1f_olink_lasso_models_no35EM.RData"
+#   )
+# )
+}
+
+auc_summary_plot <- auc |>
+  tibble::rownames_to_column("auc_row") |>
+  dplyr::mutate(ID = sub("\\..*$", "", auc_row)) |>
+  dplyr::group_by(ID) |>
+  dplyr::summarise(
+    train_auc = mean(train, na.rm = TRUE),
+    test_auc = mean(test, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+labels_plot <- auc_summary_plot |>
+  dplyr::transmute(ID, mean_auc = test_auc)
+
+labels_train_plot <- auc_summary_plot |>
+  dplyr::transmute(ID, mean_auc = train_auc)
+
+labels_full_plot <- data.frame(
+  ID = timepoints,
+  full_auc = auc_full
+)
+
+olink_roc <- ggplot(roc_plot, aes(x = FPR, y = TPR, group = type, col = type)) +
+  geom_step(direction = "vh", linewidth = 0.25) +
+  geom_text(
+    data = labels_full_plot,
+    aes(label = paste0("AUC Full = ", format(round(full_auc, 2), nsmall = 2))),
+    x = Inf,
+    y = -Inf,
+    hjust = 1.00,
+    vjust = -2.6,
+    size = 2.85,
+    inherit.aes = FALSE,
+    col = gg_color_hue(3)[1]
+  ) +
+  geom_text(
+    data = labels_train_plot,
+    aes(label = paste0("Mean AUC Train = ", format(round(mean_auc, 2), nsmall = 2))),
+    x = Inf,
+    y = -Inf,
+    hjust = 1.00,
+    vjust = -1.4,
+    size = 2.85,
+    inherit.aes = FALSE,
+    col = gg_color_hue(3)[3]
+  ) +
+  geom_text(
+    data = labels_plot,
+    aes(label = paste0("Mean AUC Test = ", format(round(mean_auc, 2), nsmall = 2))),
+    x = Inf,
+    y = -Inf,
+    hjust = 1.00,
+    vjust = -0.2,
+    size = 2.85,
+    inherit.aes = FALSE,
+    col = gg_color_hue(3)[2]
+  ) +
+  geom_line(
+    data = data.frame(x = 0:1, y = 0:1, type = "line"),
+    aes(x = x, y = y, col = type),
+    col = "black",
+    linewidth = 0.25
+  ) +
+  facet_wrap(~ID) +
+  scale_x_continuous(
+    labels = function(x) {
+      ifelse(x %in% c(0, 1), sprintf("%.0f", x), sprintf("%.2f", x))
+    }
+  ) +
+  guides(col = "none") +
+  labs(x = "FPR", y = "TPR") +
+  theme_minimal(base_size = 10)
+
+olink_roc
+
+figureS1g <- here::here("fig_s1_files", "figure_S01g_olink_lasso_roc_curves.png")
+
+ggsave(
+  figureS1g,
+  olink_roc,
+  device = ragg::agg_png,
+  width = 3.9,
+  height = 3.9,
+  units = "in",
+  dpi = 600
+)
+
+knitr::include_graphics(figureS1g)
+```
+
+```{r session_info}
+sessionInfo()
+```
+
 

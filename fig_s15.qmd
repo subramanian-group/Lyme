@@ -1,0 +1,353 @@
+---
+title: "Figure S15"
+editor_options:
+  chunk_output_type: console
+format: gfm
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+---
+
+```{r libraries}
+#| echo: false
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  ggrepel,
+  ragg,
+  here,
+  Seurat,
+  conflicted
+)
+```
+
+```{r setup}
+#| echo: false
+conflicted::conflicts_prefer(
+  dplyr::select,
+  dplyr::filter,
+  dplyr::slice,
+  dplyr::count,
+  dplyr::rename,
+  dplyr::desc
+)
+
+theme_set(theme_minimal(base_size = 8))
+options(ggrepel.max.overlaps = Inf)
+```
+
+```{r helpers}
+#| echo: false
+
+# Dynamically loads Seurat object and extracts UMAP/DotPlot plotting data
+load_subcluster_plot_data <- function(name) {
+  # Map the script's internal names to the actual .RData file names
+  name_map <- c("endothelial" = "Endothelial", "fibroblast" = "Fibroblast", "keratinocyte" = "Keratinocyte")
+  file_name <- name_map[[name]]
+  
+  e <- new.env()
+  # Fixed path to match your local directory structure
+  load(here::here("data", "intermediate", "03_public_skin_rna", paste0("Labeled_", file_name, ".RData")), envir = e)
+  
+  sub <- e$sub
+  markers <- e$markers
+  markers_used <- e$markers_used
+  labels <- e$labels
+  
+  Seurat::DefaultAssay(sub) <- "integrated"
+  
+  # 1. Extract UMAP Data
+  umap_data <- Seurat::Embeddings(sub, "umap") |>
+    as.data.frame() |>
+    setNames(c("UMAP_1", "UMAP_2")) |>
+    tibble::rownames_to_column("cell") |>
+    dplyr::mutate(Identity = sub$Identity)
+    
+  # 2. Extract DotPlot Data using .R script logic
+  markers_small <- markers |>
+    dplyr::group_by(cluster) |>
+    dplyr::top_n(n = 2, wt = avg_log2FC)
+    
+  feat <- Map(c, markers_used, split(markers_small$gene, markers_small$cluster))
+  feat <- unique(unlist(lapply(feat, unique)))
+  
+  dp <- Seurat::DotPlot(sub, features = feat, group.by = 'seurat_clusters', cluster.idents = TRUE)
+  
+  # 3. Build label lookup table
+  label_lookup <- data.frame(
+    id = levels(dp$data$id),
+    cluster_label = labels[as.numeric(levels(dp$data$id)) + 1]
+  )
+  
+  identity_levels <- if (is.factor(sub$Identity)) levels(sub$Identity) else sort(unique(sub$Identity))
+  
+  list(
+    umap_data = umap_data,
+    dot_data = dp$data,
+    id_levels = levels(dp$data$id),
+    feature_levels = levels(dp$data$features.plot),
+    identity_levels = identity_levels,
+    label_lookup = label_lookup
+  )
+}
+
+abbreviate_subcluster_labels <- function(x) {
+  dplyr::recode(
+    x,
+    "M1 Activated Macrophages" = "M1 macrophages",
+    "CLEC9A+ DCs - Replicating" = "CLEC9A+ DCs (rep.)",
+    "Langerhans Cells" = "Langerhans",
+    "Dividing Venular ECs" = "Div. venular ECs",
+    "Outer Root Sheath" = "Outer root sh."
+  )
+}
+
+plot_subcluster_dotplot <- function(plot_data) {
+  dot_data <- plot_data$dot_data |>
+    dplyr::mutate(
+      id = factor(as.character(id), levels = plot_data$id_levels),
+      features.plot = factor(as.character(features.plot), levels = plot_data$feature_levels)
+    )
+
+  cluster_labels <- abbreviate_subcluster_labels(plot_data$label_lookup$cluster_label)
+  names(cluster_labels) <- as.character(plot_data$label_lookup$id)
+
+  ggplot2::ggplot(dot_data, ggplot2::aes(id, features.plot)) +
+    ggplot2::geom_point(
+      ggplot2::aes(size = pct.exp, color = avg.exp.scaled),
+      stroke = 0
+    ) +
+    ggplot2::scale_x_discrete(
+      position = "top",
+      labels = cluster_labels,
+      drop = FALSE
+    ) +
+    ggplot2::scale_y_discrete(
+      limits = rev(plot_data$feature_levels),
+      expand = ggplot2::expansion(add = 1)
+    ) +
+    ggplot2::scale_size(
+      range = c(0, 5),
+      name = "% expressed",
+      limits = c(0, 100),
+      breaks = c(25, 50, 75)
+    ) +
+    ggplot2::scale_color_gradient(
+      low = "#d9d2e9",
+      high = "blue",
+      name = "Avg. expression",
+      limits = c(-1, 2),
+      breaks = c(-1, 0, 1, 2),
+      oob = scales::squish
+    ) +
+    ggplot2::labs(x = NULL, y = NULL) +
+    ggplot2::theme_minimal(base_size = 8) +
+    ggplot2::theme(
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.grid.major.y = ggplot2::element_line(colour = "grey85", linewidth = 0.25),
+      axis.text.x.top = ggplot2::element_text(
+        colour = "grey45",
+        angle = 55,
+        hjust = 0,
+        vjust = 0,
+        size = 7,
+        face = "bold"
+      ),
+      axis.text.x.bottom = ggplot2::element_blank(),
+      axis.text.y = ggplot2::element_text(colour = "grey45", size = 6, face = "bold"),
+      axis.ticks = ggplot2::element_blank(),
+      legend.position = "bottom",
+      legend.box = "horizontal",
+      legend.text = ggplot2::element_text(size = 6),
+      legend.title = ggplot2::element_text(size = 6),
+      legend.margin = ggplot2::margin(0, 0, 0, 0),
+      legend.box.just = "center",
+      legend.spacing.x = grid::unit(2, "mm"),
+      plot.margin = ggplot2::margin(2, 2, 2, 2)
+    ) +
+    ggplot2::guides(
+      size = ggplot2::guide_legend(
+        title.position = "top",
+        order = 2,
+        override.aes = list(color = "black")
+      ),
+      color = ggplot2::guide_colorbar(
+        title.position = "top",
+        order = 1,
+        barwidth = grid::unit(22, "mm"),
+        barheight = grid::unit(3, "mm")
+      )
+    )
+}
+
+plot_subcluster_umap <- function(plot_data, title) {
+  umap_data <- plot_data$umap_data |>
+    dplyr::mutate(Identity = factor(as.character(Identity), levels = plot_data$identity_levels))
+
+  ggplot2::ggplot(umap_data, ggplot2::aes(UMAP_1, UMAP_2, color = Identity)) +
+    ggplot2::geom_point(size = 0.01, alpha = 0.9) +
+    ggplot2::scale_color_discrete(
+      drop = FALSE,
+      labels = abbreviate_subcluster_labels
+    ) +
+    ggplot2::guides(color = ggplot2::guide_legend(
+      ncol = 2,
+      byrow = TRUE,
+      override.aes = list(size = 2, alpha = 1)
+    )) +
+    ggplot2::labs(title = title, x = "UMAP_1", y = "UMAP_2") +
+    ggplot2::theme_classic(base_size = 8) +
+    ggplot2::theme(
+      legend.position = "bottom",
+      legend.justification = "center",
+      legend.box = "horizontal",
+      legend.title = ggplot2::element_blank(),
+      legend.text = ggplot2::element_text(size = 6),
+      legend.key.size = grid::unit(2.5, "mm"),
+      legend.background = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(size = 8),
+      axis.text = ggplot2::element_text(size = 8),
+      plot.title = ggplot2::element_text(size = 8, hjust = 0.5),
+      plot.margin = ggplot2::margin(3, 3, 3, 3)
+    )
+}
+```
+
+```{r data}
+#| echo: false
+dir.create(here::here("fig_s15_files"), showWarnings = FALSE, recursive = TRUE)
+```
+
+### Panel S15A: Endothelial Subclusters
+
+```{r s15a_endothelial_subclusters}
+#| fig-cap: "Figure S15A"
+
+figure_s15a_dotplot <- here::here(
+  "fig_s15_files",
+  "figure_S15a_endothelial_subcluster_markers_dotplot.png"
+)
+
+figure_s15a_umap <- here::here(
+  "fig_s15_files",
+  "figure_S15a_endothelial_subclusters_umap.png"
+)
+
+figure_s15a_data <- load_subcluster_plot_data("endothelial")
+figure_s15a_dotplot_plot <- plot_subcluster_dotplot(figure_s15a_data)
+figure_s15a_umap_plot <- plot_subcluster_umap(figure_s15a_data, "Endothelial cells")
+
+ggplot2::ggsave(
+  figure_s15a_dotplot,
+  figure_s15a_dotplot_plot,
+  device = ragg::agg_png,
+  width = 3.5,
+  height = 3.5,
+  units = "in",
+  dpi = 300
+)
+
+ggplot2::ggsave(
+  figure_s15a_umap,
+  figure_s15a_umap_plot,
+  device = ragg::agg_png,
+  width = 3.5,
+  height = 3.5,
+  units = "in",
+  dpi = 300
+)
+
+knitr::include_graphics(c(figure_s15a_dotplot, figure_s15a_umap))
+```
+
+### Panel S15B: Fibroblast Subclusters
+
+```{r s15b_fibroblast_subclusters}
+#| fig-cap: "Figure S15B"
+
+figure_s15b_dotplot <- here::here(
+  "fig_s15_files",
+  "figure_S15b_fibroblast_subcluster_markers_dotplot.png"
+)
+
+figure_s15b_umap <- here::here(
+  "fig_s15_files",
+  "figure_S15b_fibroblast_subclusters_umap.png"
+)
+
+figure_s15b_data <- load_subcluster_plot_data("fibroblast")
+figure_s15b_dotplot_plot <- plot_subcluster_dotplot(figure_s15b_data)
+figure_s15b_umap_plot <- plot_subcluster_umap(figure_s15b_data, "Fibroblasts")
+
+ggplot2::ggsave(
+  figure_s15b_dotplot,
+  figure_s15b_dotplot_plot,
+  device = ragg::agg_png,
+  width = 3.5,
+  height = 3.5,
+  units = "in",
+  dpi = 300
+)
+
+ggplot2::ggsave(
+  figure_s15b_umap,
+  figure_s15b_umap_plot,
+  device = ragg::agg_png,
+  width = 3.5,
+  height = 3.5,
+  units = "in",
+  dpi = 300
+)
+
+knitr::include_graphics(c(figure_s15b_dotplot, figure_s15b_umap))
+```
+
+### Panel S15C: Keratinocyte Subclusters
+
+```{r s15c_keratinocyte_subclusters}
+#| fig-cap: "Figure S15C"
+
+figure_s15c_dotplot <- here::here(
+  "fig_s15_files",
+  "figure_S15c_keratinocyte_subcluster_markers_dotplot.png"
+)
+
+figure_s15c_umap <- here::here(
+  "fig_s15_files",
+  "figure_S15c_keratinocyte_subclusters_umap.png"
+)
+
+figure_s15c_data <- load_subcluster_plot_data("keratinocyte")
+figure_s15c_dotplot_plot <- plot_subcluster_dotplot(figure_s15c_data)
+figure_s15c_umap_plot <- plot_subcluster_umap(figure_s15c_data, "Keratinocytes")
+
+ggplot2::ggsave(
+  figure_s15c_dotplot,
+  figure_s15c_dotplot_plot,
+  device = ragg::agg_png,
+  width = 3.5,
+  height = 3.5,
+  units = "in",
+  dpi = 300
+)
+
+ggplot2::ggsave(
+  figure_s15c_umap,
+  figure_s15c_umap_plot,
+  device = ragg::agg_png,
+  width = 3.5,
+  height = 3.5,
+  units = "in",
+  dpi = 300
+)
+
+knitr::include_graphics(c(figure_s15c_dotplot, figure_s15c_umap))
+```
+
+```{r session_info}
+sessionInfo()
+```
