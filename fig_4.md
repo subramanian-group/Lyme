@@ -1,0 +1,609 @@
+# Figure 4
+
+
+## Setup
+
+``` r
+options(repos = c(CRAN = "https://cran.rstudio.com"))
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  here,
+  lmtest,
+  FELLA,
+  ComplexHeatmap,
+  circlize,
+  ggprism,
+  ragg,
+  install = FALSE
+)
+
+load(here::here("data", "processed", "01_proteomics_metabolomics", "Data.RData"))
+
+dir.create("fig_4_files", showWarnings = FALSE, recursive = TRUE)
+
+returnSigStars = function(x) {
+  x2 = x
+  x2[is.numeric(x) & x > 0.05] = "ns"
+  x2[is.numeric(x) & x < 0.05] = "*"
+  x2[is.numeric(x) & x < 0.01] = "**"
+  x2[is.numeric(x) & x < 0.001] = "***"
+  x2[is.numeric(x) & x < 0.0001] = "****"
+  x2
+}
+
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Exclude the 35-EM patient. Comment this block out to include them.
+samples_without_35EM <- data$sampleData |>
+  tibble::rownames_to_column("sample_rowname") |>
+  dplyr::filter(
+    as.character(Subject_ID) != "201455",
+    !as.character(sample) %in% c("201455 T1", "201455 T2")
+  ) |>
+  dplyr::pull(sample_rowname)
+
+data$sampleData <- data$sampleData[samples_without_35EM, , drop = FALSE]
+data$assayData <- data$assayData[samples_without_35EM, , drop = FALSE]
+data$data <- data$data[samples_without_35EM, , drop = FALSE]
+data$directSymptoms <- data$directSymptoms[samples_without_35EM, , drop = FALSE]
+data$confoundingSymptoms <- data$confoundingSymptoms[samples_without_35EM, , drop = FALSE]
+data$emData <- data$emData[samples_without_35EM, , drop = FALSE]
+data$symptomData <- data$symptomData[samples_without_35EM, , drop = FALSE]
+data$treatmentData <- data$treatmentData[samples_without_35EM, , drop = FALSE]
+data$olinkNew <- data$olinkNew[samples_without_35EM, , drop = FALSE]
+data$olinkNewFail <- data$olinkNewFail[samples_without_35EM, , drop = FALSE]
+
+metabolon_patient_samples_without_35EM <- data$metabolon$pat_pdata |>
+  tibble::rownames_to_column("sample_rowname") |>
+  dplyr::filter(
+    as.character(Subject_ID) != "201455",
+    !as.character(sample) %in% c("201455 T1", "201455 T2")
+  ) |>
+  dplyr::pull(sample_rowname)
+
+data$metabolon$pat_pdata <- data$metabolon$pat_pdata[metabolon_patient_samples_without_35EM, , drop = FALSE]
+data$metabolon$pat_data <- data$metabolon$pat_data[metabolon_patient_samples_without_35EM, , drop = FALSE]
+data$metabolon$pat_data_imp <- data$metabolon$pat_data_imp[metabolon_patient_samples_without_35EM, , drop = FALSE]
+data$metabolon$combat_data <- data$metabolon$combat_data[
+  !rownames(data$metabolon$combat_data) %in% c("201455 T1", "201455 T2"),
+  ,
+  drop = FALSE
+]
+```
+
+## Pairwise Metabolite Testing
+
+``` r
+# Remove metabolites missing in >=20% of patient samples.
+d = as.matrix(data$metabolon$pat_data)
+dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+pna = colSums(is.na(d)) / nrow(d) * 100
+keep2 = pna < 20
+keep1 = dpab == 0
+
+d = d[keep1, keep2]
+age = data$metabolon$pat_pdata$Age_at_Time_of_Study_Entry[keep1]
+sex = data$metabolon$pat_pdata$Gender[keep1]
+sex = c("M", "F")[match(sex, c("Male", "Female"))]
+time = data$metabolon$pat_pdata$time[keep1]
+bmi = data$metabolon$pat_pdata$BMI[keep1]
+pulse = data$metabolon$pat_pdata$Pulse[keep1]
+id = data$metabolon$pat_pdata$Subject_ID[keep1]
+
+d = list(
+  T1 = d[time == "T1", , drop = FALSE],
+  T2 = d[time == "T2", , drop = FALSE],
+  T3 = d[time == "T3", , drop = FALSE],
+  T4 = d[time == "T4", , drop = FALSE]
+)
+d = lapply(d, as.data.frame)
+age = split(age, time)
+sex = split(sex, time)
+id = split(id, time)
+bmi = split(bmi, time)
+bmi$T2 = bmi$T1
+pulse = split(pulse, time)
+pulse$T2 = pulse$T1
+time = split(time, time)
+
+comps = list(
+  c("T1", "T2"),
+  c("T1", "T3"),
+  c("T1", "T4"),
+  c("T2", "T3"),
+  c("T2", "T4"),
+  c("T3", "T4")
+)
+
+rmat = data.frame(
+  matrix(
+    NA,
+    nrow = ncol(d[[1]]),
+    ncol = length(comps),
+    dimnames = list(colnames(d[[1]]), sapply(comps, paste0, collapse = " - "))
+  )
+)
+
+res_lm = list(
+  lrt = list(
+    p = rmat,
+    p.adj = rmat,
+    logFC = rmat,
+    coef = rmat
+  )
+)
+
+for (i in seq_along(comps)) {
+  comp1 = comps[[i]][1]
+  comp2 = comps[[i]][2]
+
+  ids = c(id[[comp1]], id[[comp2]])
+  keep = ids %in% ids[which(table(ids) == 2)]
+
+  df = data.frame(
+    ids = factor(paste0("L", ids[keep])),
+    time = factor(
+      c(rep(comp1, length(id[[comp1]])), rep(comp2, length(id[[comp2]])))[keep],
+      levels = c(comp2, comp1),
+      ordered = TRUE
+    ),
+    sex = factor(c(sex[[comp1]], sex[[comp2]])[keep]),
+    age = c(age[[comp1]], age[[comp2]])[keep],
+    bmi = c(bmi[[comp1]], bmi[[comp2]])[keep],
+    pulse = c(pulse[[comp1]], pulse[[comp2]])[keep]
+  )
+  x = rbind(d[[comp1]], d[[comp2]])[keep, , drop = FALSE]
+
+  for (j in seq_len(ncol(x))) {
+    df2 = df
+    df2$m = x[, j]
+    df2 = na.omit(df2)
+    df2 = df2[df2$ids %in% df2$ids[which(table(df2$ids) == 2)], ]
+
+    if (nrow(df2) == 0 || length(unique(df2$time)) < 2) next
+
+    a = df2[df2$time == comp1, ]
+    b = df2[df2$time == comp2, ]
+    a = a[match(a$ids, b$ids), ]
+    lfc = mean(a$m - b$m, na.rm = TRUE)
+
+    fm = lm(m ~ time + sex + ids + age + bmi + pulse, data = df2)
+    rm = lm(m ~ sex + ids + age + bmi + pulse, data = df2)
+    lrt = tryCatch(lmtest::lrtest(fm, rm), error = function(e) NULL)
+
+    if (!is.null(lrt)) {
+      res_lm$lrt$p[j, i] = lrt$`Pr(>Chisq)`[2]
+    }
+    res_lm$lrt$coef[j, i] = coef(fm)[2]
+    res_lm$lrt$logFC[j, i] = lfc
+  }
+
+  res_lm$lrt$p.adj[, i] = p.adjust(res_lm$lrt$p[, i], method = "BH")
+}
+
+deg_res = list(lrt = res_lm$lrt)
+```
+
+## Panel A
+
+### FELLA Pathway Module Heatmap
+
+``` r
+fella_dir = normalizePath(
+  here::here(
+    "data", "intermediate", "01_proteomics_metabolomics", "FELLA"
+  ),
+  winslash = "/",
+  mustWork = TRUE
+)
+fella.data <- loadKEGGdata(
+  databaseDir = fella_dir,
+  internalDir = FALSE,
+  loadMatrix = "pagerank"
+)
+
+generate_fella_pagerank_table = function(x) {
+  page <- generateResultsTable(
+    object = x,
+    method = "pagerank",
+    threshold = 0.1,
+    data = fella.data
+  )
+  list(PageRank = page)
+}
+
+p = deg_res$lrt$p
+lfc = deg_res$lrt$logFC
+fdata = data$metabolon$fdata[match(rownames(p), data$metabolon$fdata$BIOCHEMICAL_NAME), ]
+p = p[fdata$KEGG != "", ]
+fdata = fdata[fdata$KEGG != "", ]
+lfc = lfc[rownames(p), ]
+
+fella_table_up = list()
+for (i in seq_len(ncol(p))) {
+  comp = colnames(p)[i]
+  background = gsub(",.*", "", fdata$KEGG)
+  comp_up = gsub(",.*", "", fdata$KEGG[p[, comp] < 0.05 & lfc[, comp] > 0])
+  fella_res_up = enrich(
+    compounds = comp_up,
+    compoundsBackground = background,
+    method = "pagerank",
+    approx = "normality",
+    data = fella.data
+  )
+  fella_table_up[[i]] = generate_fella_pagerank_table(fella_res_up)
+}
+names(fella_table_up) = gsub("\\.\\.\\.", " - ", colnames(p))
+
+getFellaTable = function(x, type, keyword = "module") {
+  n = names(x)
+  d = lapply(x, function(x) {
+    data.frame(x[[type]][x[[type]]$Entry.type == keyword, c("KEGG.name", "p.score")])
+  })
+  d[sapply(d, ncol) == 0] = rep(
+    list(data.frame(KEGG.name = "missing", p.score = NA)),
+    sum(sapply(d, ncol) == 0)
+  )
+  d = lapply(d, function(x) x[!duplicated(x$KEGG.name), ])
+  t = Reduce(function(x, y) merge(x, y, by = "KEGG.name", all = TRUE), d) |>
+    tibble::column_to_rownames("KEGG.name")
+  colnames(t) = n
+  t[is.na(t)] = 1
+  t[rownames(t) != "missing", ]
+}
+
+page_up = getFellaTable(
+  x = fella_table_up,
+  type = "PageRank",
+  keyword = "module"
+)
+
+lp = list(
+  title = "-log10(p)",
+  legend_height = unit(5, "mm"),
+  legend_width = unit(2.5, "mm"),
+  labels_gp = gpar(fontsize = 7),
+  grid_height = unit(5, "mm"),
+  grid_width = unit(5, "mm"),
+  title_position = "topcenter",
+  title_gp = gpar(fontsize = 8, fontface = "bold")
+)
+col_fun = circlize::colorRamp2(c(0, 6), c("white", gg_color_hue(1)))
+
+d = page_up
+d = d[rowSums(d[, 1:3, drop = FALSE] < 0.05) > 0, , drop = FALSE]
+module_labels = dplyr::case_when(
+  grepl("^Arginine biosynthesis, ornithine", rownames(d)) ~ "Arginine biosynthesis (M00844)",
+  grepl("^Polyamine biosynthesis", rownames(d)) ~ "Polyamine biosynthesis (M00134)",
+  grepl("^Arginine biosynthesis, glutamate", rownames(d)) ~ "Arginine biosynthesis (M00845)",
+  grepl("^Urea cycle", rownames(d)) ~ "Urea cycle (M00029)",
+  grepl("^Phosphatidylcholine", rownames(d)) ~ "Phosphatidylcholine biosynthesis (M00090)",
+  grepl("^Methionine salvage", rownames(d)) ~ "Methionine salvage pathway (M00034)",
+  grepl("^Pyrimidine degradation", rownames(d)) ~ "Pyrimidine degradation (M00046)",
+  grepl("^Thiamine biosynthesis", rownames(d)) ~ "Thiamine biosynthesis (M00897)",
+  grepl("^Ceramide biosynthesis", rownames(d)) ~ "Ceramide biosynthesis (M00094)",
+  grepl("^Sphingosine biosynthesis", rownames(d)) ~ "Sphingosine biosynthesis (M00099)",
+  grepl("^Sphingosine degradation", rownames(d)) ~ "Sphingosine degradation (M00100)",
+  grepl("^Phosphatidylethanolamine", rownames(d)) ~ "Phosphatidylethanolamine biosynthesis (M00092)",
+  grepl("^D-galactonate degradation", rownames(d)) ~ "D-galactonate degradation (M00552)",
+  grepl("^beta-Oxidation", rownames(d)) ~ "beta-Oxidation (M00086)",
+  grepl("^Triacylglycerol", rownames(d)) ~ "Triacylglycerol biosynthesis (M00089)",
+  grepl("^N-glycan precursor", rownames(d)) ~ "N-glycan precursor trimming (M00073)",
+  grepl("^N-glycan biosynthesis", rownames(d)) ~ "N-glycan biosynthesis (M00074)",
+  grepl("^NAD biosynthesis, aspartate", rownames(d)) ~ "NAD biosynthesis (M00115)",
+  grepl("^NAD biosynthesis, tryptophan", rownames(d)) ~ "NAD biosynthesis (M00912)",
+  grepl("^Ketone body", rownames(d)) ~ "Ketone body biosynthesis (M00088)",
+  TRUE ~ rownames(d)
+)
+rownames(d) = module_labels
+module_types = c(
+  "Arginine", "Arginine", "Energy", "Sphingolipid", "Energy",
+  "Ketones", "Other", "Glycan", "Glycan", "Tryptophan",
+  "Tryptophan", "Other", "Sphingolipid", "Arginine", "Other",
+  "Sphingolipid", "Sphingolipid", "Other", "Energy", "Other"
+)
+row_split = if (length(module_types) == nrow(d)) module_types else NULL
+
+hm = Heatmap(
+  as.matrix(-log10(d)),
+  cluster_columns = FALSE,
+  row_split = row_split,
+  row_names_side = "right",
+  row_dend_side = "left",
+  row_dend_width = unit(3, "mm"),
+  name = "-log10(p)",
+  width = unit(20, "mm"),
+  row_names_gp = gpar(fontsize = 7),
+  column_names_gp = gpar(fontsize = 7),
+  row_title_gp = gpar(fontsize = 7),
+  row_title_rot = 0,
+  show_heatmap_legend = FALSE,
+  heatmap_legend_param = lp,
+  col = col_fun
+)
+
+figure4a <- here::here("fig_4_files", "figure_04a_metabolite_pathway_enrichment_heatmap.png")
+ragg::agg_png(figure4a, width = 3.82, height = 3.17, units = "in", res = 300, scaling = 1)
+hm_drawn_4a <- ComplexHeatmap::draw(
+  hm,
+  padding = unit(c(2, 1, 2, 1), "mm")
+)
+
+legend_4a <- Legend(
+  title = "-log10(p)",
+  col_fun = col_fun,
+  at = c(0, 2, 4, 6),
+  labels = c("0", "2", "4", "6"),
+  direction = "horizontal",
+  legend_width = unit(32, "mm"),
+  grid_height = unit(4, "mm"),
+  title_position = "leftcenter",
+  labels_gp = gpar(fontsize = 8),
+  title_gp = gpar(fontsize = 8, fontface = "bold")
+)
+draw(
+  legend_4a,
+  x = unit(0.50, "npc"),
+  y = unit(0.015, "npc"),
+  just = c("left", "bottom")
+)
+
+if (!is.null(row_split)) {
+  for (slice_i in seq_len(length(unique(row_split)) - 1)) {
+    decorate_heatmap_body("-log10(p)", slice = slice_i, {
+      grid.lines(
+        x = unit(c(0, 1.05), "npc"),
+        y = unit(c(0, 0), "npc"),
+        gp = gpar(col = "black", lwd = 0.8)
+      )
+    })
+    decorate_row_names("-log10(p)", slice = slice_i, {
+      grid.lines(
+        x = unit(c(0, 1), "npc"),
+        y = unit(c(0, 0), "npc"),
+        gp = gpar(col = "black", lwd = 0.8)
+      )
+    })
+  }
+}
+
+grDevices::dev.off()
+```
+
+    png 
+      2 
+
+``` r
+knitr::include_graphics(figure4a)
+```
+
+![](fig_4_files/figure_04a_metabolite_pathway_enrichment_heatmap.png)
+
+## Plotting Helpers
+
+``` r
+fix_pos = function(x, perc = 0.1) {
+  ord = order(x, decreasing = FALSE)
+  x2 = x[ord]
+  min_diff = abs(max(x2, na.rm = TRUE)) * perc
+  if (!is.finite(min_diff) || min_diff == 0) min_diff = perc
+  for (i in seq_len(length(x2) - 1)) {
+    if ((x2[i + 1] - x2[i]) < min_diff) {
+      x2[i + 1] = x2[i] + min_diff
+    }
+  }
+  x2[ord]
+}
+
+prep_signature_data = function(mets) {
+  d = data$metabolon$pat_data
+  pd = data$metabolon$pat_pdata
+  dpab = data$metabolon$pat_pdata$days_of_prior_antibiotics
+  d = d[dpab == 0, mets, drop = FALSE]
+  pd = pd[dpab == 0, , drop = FALSE]
+
+  d = cbind(d, pd) |>
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(mets),
+      names_to = "metabolite",
+      values_to = "value"
+    )
+
+  p_val_df = as.data.frame(t(deg_res$lrt$p.adj[mets, , drop = FALSE])) |>
+    tibble::rownames_to_column("comparison") |>
+    tidyr::pivot_longer(
+      cols = -comparison,
+      names_to = "metabolite",
+      values_to = "p.adj"
+    )
+  p_val_df$group1 = stringr::str_extract(p_val_df$comparison, "^T[0-9]")
+  p_val_df$group2 = stringr::str_extract(p_val_df$comparison, "T[0-9]$")
+  p_val_df = p_val_df[p_val_df$p.adj < 0.05, ]
+
+  p_val_df$y.position = apply(p_val_df, 1, function(x) {
+    keep = d$time %in% c(x["group1"], x["group2"]) &
+      d$metabolite == x["metabolite"]
+    vals = d$value[keep]
+    max_val = max(vals, na.rm = TRUE)
+    val_range = diff(range(vals, na.rm = TRUE))
+    if (!is.finite(val_range) || val_range == 0) val_range = abs(max_val)
+    if (!is.finite(val_range) || val_range == 0) val_range = 1
+    max_val + 0.15 * val_range
+  })
+
+  for (i in seq_along(unique(p_val_df$metabolite))) {
+    inds = which(p_val_df$metabolite == unique(p_val_df$metabolite)[i])
+    if (length(inds) > 1) {
+      p_val_df$y.position[inds] = fix_pos(p_val_df$y.position[inds], perc = 0.15)
+    }
+  }
+
+  p_val_df$p.adj = returnSigStars(p_val_df$p.adj)
+  d$metabolite = factor(d$metabolite, levels = mets, ordered = TRUE)
+
+  list(d = d, p_val_df = as.data.frame(p_val_df))
+}
+
+plot_signature_boxes = function(mets) {
+  dat = prep_signature_data(mets)
+  d = dat$d
+  p_val_df = dat$p_val_df
+
+  p = ggplot(d, aes(x = time, y = value)) +
+    geom_boxplot(fill = NA, outlier.shape = NA, size = 0.3) +
+    geom_point(alpha = 0.7, size = 0.25) +
+    facet_wrap(
+      vars(metabolite),
+      scales = "fixed",
+      ncol = length(mets),
+      labeller = label_wrap_gen(width = 20)
+    ) +
+    xlab("") +
+    ylab("log( x / median(x) )") +
+   theme_minimal(base_size = 10) +
+    theme(
+      legend.position = "none"
+    )
+
+  if (nrow(p_val_df) > 0) {
+    p = p + ggprism::add_pvalue(
+      data = p_val_df,
+      label = "p.adj",
+      bracket.size = 0.3,
+      label.size = 3.2
+    )
+  }
+
+  p
+}
+```
+
+## Panel B
+
+### Tryptophan IDO1 Metabolism Boxplots
+
+``` r
+tryp = c("quinolinate", "tryptophan")
+figure4b <- here::here("fig_4_files", "figure_04b_tryptophan_metabolism_boxplots.png")
+figure4b_plot <- plot_signature_boxes(tryp)
+ggplot2::ggsave(
+  filename = figure4b,
+  plot = figure4b_plot,
+  device = ragg::agg_png,
+  width = 2.17,
+  height = 1.81,
+  units = "in",
+  dpi = 300
+)
+knitr::include_graphics(figure4b)
+```
+
+![](fig_4_files/figure_04b_tryptophan_metabolism_boxplots.png)
+
+## Panel C
+
+### Ketone Body Boxplots
+
+``` r
+keto = c("3-hydroxybutyrate (BHBA)", "acetoacetate")
+figure4c <- here::here("fig_4_files", "figure_04c_ketone_body_metabolism_boxplots.png")
+figure4c_plot <- plot_signature_boxes(keto)
+ggplot2::ggsave(
+  filename = figure4c,
+  plot = figure4c_plot,
+  device = ragg::agg_png,
+  width = 2.5,
+  height = 1.81,
+  units = "in",
+  dpi = 300
+)
+knitr::include_graphics(figure4c)
+```
+
+![](fig_4_files/figure_04c_ketone_body_metabolism_boxplots.png)
+
+## Panel D
+
+### Sphingolipid Boxplots
+
+``` r
+sphing = c("sphingosine", "sphingosine 1-phosphate", "phosphoethanolamine")
+figure4d <- here::here("fig_4_files", "figure_04d_sphingolipid_metabolism_boxplots.png")
+figure4d_plot <- plot_signature_boxes(sphing)
+ggplot2::ggsave(
+  filename = figure4d,
+  plot = figure4d_plot,
+  device = ragg::agg_png,
+  width = 4,
+  height = 2,
+  units = "in",
+  dpi = 300
+)
+knitr::include_graphics(figure4d)
+```
+
+![](fig_4_files/figure_04d_sphingolipid_metabolism_boxplots.png)
+
+``` r
+sessionInfo()
+```
+
+    R version 4.4.1 (2024-06-14 ucrt)
+    Platform: x86_64-w64-mingw32/x64
+    Running under: Windows 11 x64 (build 22631)
+
+    Matrix products: default
+
+
+    locale:
+    [1] LC_COLLATE=English_United States.utf8 
+    [2] LC_CTYPE=English_United States.utf8   
+    [3] LC_MONETARY=English_United States.utf8
+    [4] LC_NUMERIC=C                          
+    [5] LC_TIME=English_United States.utf8    
+
+    time zone: America/Los_Angeles
+    tzcode source: internal
+
+    attached base packages:
+    [1] grid      stats     graphics  grDevices utils     datasets  methods  
+    [8] base     
+
+    other attached packages:
+     [1] ragg_1.3.2            ggprism_1.0.5         circlize_0.4.16      
+     [4] ComplexHeatmap_2.20.0 FELLA_1.24.0          lmtest_0.9-40        
+     [7] zoo_1.8-12            here_1.0.1            lubridate_1.9.3      
+    [10] forcats_1.0.0         stringr_1.5.1         dplyr_1.1.4          
+    [13] purrr_1.0.2           readr_2.1.5           tidyr_1.3.1          
+    [16] tibble_3.2.1          ggplot2_4.0.0         tidyverse_2.0.0      
+
+    loaded via a namespace (and not attached):
+     [1] tidyselect_1.2.1        farver_2.1.2            Biostrings_2.72.1      
+     [4] S7_0.2.0                fastmap_1.2.0           pacman_0.5.1           
+     [7] digest_0.6.37           timechange_0.3.0        lifecycle_1.0.4        
+    [10] cluster_2.1.6           KEGGREST_1.44.1         magrittr_2.0.3         
+    [13] compiler_4.4.1          rlang_1.1.4             tools_4.4.1            
+    [16] igraph_2.0.3            yaml_2.3.10             knitr_1.49             
+    [19] labeling_0.4.3          plyr_1.8.9              RColorBrewer_1.1-3     
+    [22] withr_3.0.2             BiocGenerics_0.50.0     stats4_4.4.1           
+    [25] colorspace_2.1-1        scales_1.4.0            iterators_1.0.14       
+    [28] cli_3.6.3               rmarkdown_2.29          crayon_1.5.3           
+    [31] generics_0.1.3          httr_1.4.7              tzdb_0.4.0             
+    [34] rjson_0.2.23            zlibbioc_1.50.0         parallel_4.4.1         
+    [37] XVector_0.44.0          matrixStats_1.4.1       vctrs_0.6.5            
+    [40] Matrix_1.7-0            jsonlite_1.8.9          IRanges_2.38.1         
+    [43] hms_1.1.3               GetoptLong_1.0.5        S4Vectors_0.42.1       
+    [46] clue_0.3-65             systemfonts_1.1.0       magick_2.8.4           
+    [49] foreach_1.5.2           glue_1.8.0              codetools_0.2-20       
+    [52] stringi_1.8.4           gtable_0.3.6            shape_1.4.6.1          
+    [55] GenomeInfoDb_1.40.1     UCSC.utils_1.0.0        pillar_1.10.1          
+    [58] htmltools_0.5.8.1       GenomeInfoDbData_1.2.12 R6_2.5.1               
+    [61] textshaping_0.4.0       doParallel_1.0.17       rprojroot_2.0.4        
+    [64] evaluate_1.0.1          lattice_0.22-6          png_0.1-8              
+    [67] Rcpp_1.0.13             xfun_0.48               pkgconfig_2.0.3        
+    [70] GlobalOptions_0.1.2    

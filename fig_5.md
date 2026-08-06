@@ -1,0 +1,986 @@
+# Figure 5
+
+
+``` r
+load(here::here("data", "processed", "01_proteomics_metabolomics", "Data.RData"))
+```
+
+# Flow
+
+``` r
+load(here::here("data", "intermediate", "flow_gating", "bcell.RData"))
+load(here::here("data", "intermediate", "flow_gating", "tcell.RData"))
+load(here::here("data", "intermediate", "flow_gating", "monocyte.RData"))
+load(here::here("data", "intermediate", "flow_gating", "dcnk.RData"))
+
+flow = list()
+flow$panelResults = list(bcell=bcell,dcnk=dcnk,monocyte=monocyte,tcell=tcell)
+rm(bcell,dcnk,monocyte,tcell)
+
+flow$propsLong = do.call(rbind,lapply(flow$panelResults,function(x){x$propsLong}))
+flow$propsWide = pivot_wider(flow$propsLong,id_cols = id,names_from = cluster,values_from = freq)%>%column_to_rownames("id")
+flow$ncells = pivot_wider(flow$propsLong,id_cols = id,names_from = cluster,values_from = n)%>%column_to_rownames("id")
+flow$total_cells = pivot_wider(flow$propsLong,id_cols = id,names_from = cluster,values_from = total)%>%column_to_rownames("id")
+
+has_sample_data = gsub("_.*","",rownames(flow$propsWide))%in%rownames(data$sampleData)
+
+flow$propsLong = flow$propsLong[flow$propsLong$id%in%rownames(flow$propsWide)[has_sample_data],]
+flow$propsWide  = flow$propsWide[has_sample_data,]
+flow$ncells = flow$ncells[has_sample_data,]
+flow$total_cells = flow$total_cells[has_sample_data,]
+
+
+flow_sample_ids <- gsub("_.*", "", rownames(flow$propsWide))
+sample_aligned_names <- names(data)[vapply(data, function(x) {
+  (is.data.frame(x) || is.matrix(x)) &&
+    !is.null(rownames(x)) &&
+    all(flow_sample_ids %in% rownames(x))
+}, logical(1))]
+flow$data = lapply(data[sample_aligned_names],function(x){
+  x[flow_sample_ids,,drop = FALSE]
+})
+
+flow$panel = gsub("\\..*","",rownames(flow$propsLong))[match(colnames(flow$propsWide),flow$propsLong$cluster)]
+flow$panel = c("T Cell","B Cell","DCNK","Monocyte")[match(flow$panel,c("tcell","bcell","dcnk","monocyte"))]
+flow$panel[9:11] = "NK"
+flow$panel[12:15] = "DC"
+flow$propsLong$cluster = gsub(" NK Cells","",flow$propsLong$cluster)
+
+
+flow$cluster = colnames(flow$propsWide)
+colnames(flow$propsWide) = paste0(flow$panel," - ",colnames(flow$propsWide))
+colnames(flow$propsWide) = gsub("yd","gd",colnames(flow$propsWide))
+colnames(flow$propsWide) = gsub(" NK Cells","",colnames(flow$propsWide))
+flow$propsLong$cluster = gsub("yd","gd",flow$propsLong$cluster)
+```
+
+# 5a
+
+### PCA patients and controls all timepoints
+
+### Panel A: Flow Cytometry PCA Across Cohorts
+
+``` r
+# sams = flow$data$sampleData$Condition=="Patient"&
+#   flow$data$sampleData$days_of_prior_antibiotics==0
+
+## one joint PCA, then facet
+sd <- flow$data$sampleData
+
+keep <- sd$days_of_prior_antibiotics == 0 &
+  sd$Condition %in% c("Patient","Control") &
+  !grepl("35", sd$Site_s_of_EM)
+
+d <- flow$propsWide[, !grepl("Dump|Debris|DP |DN |- DN|- DP|UNKN|IL1B", colnames(flow$propsWide))]
+d <- apply(d, 2, function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
+
+keep <- keep & apply(d, 1, function(x) sum(is.na(x)) < 12) & !grepl("_1", rownames(d))
+d <- d[keep, , drop = FALSE]
+
+## impute once
+d2 <- d
+colnames(d2) <- make.names(colnames(d2))
+m <- mice::mice(d2, 1, seed = 123, printFlag = FALSE)
+d_imp <- mice::complete(m, 1)
+colnames(d_imp) <- colnames(d)
+
+## PCA once
+pca <- prcomp(d_imp, scale. = FALSE)
+
+vars <- paste0(
+  "PC", 1:ncol(pca$x),
+  " (", round(pca$sdev^2 / sum(pca$sdev^2) * 100, 1), "%)"
+)
+
+## build plotting df (no dplyr needed)
+df <- data.frame(sample_id = rownames(pca$x), pca$x, stringsAsFactors = FALSE)
+df$id <- sub(" .*", "", df$sample_id)
+df$Condition <- sd[df$sample_id, "Condition"]
+df$time <- sd[df$sample_id, "time"]
+df$dataset <- ifelse(df$Condition == "Patient", "Patients", "Controls")
+
+## optional: mix id levels so hues do not clump by facet
+set.seed(1)
+df$id <- factor(df$id, levels = sample(sort(unique(df$id))))
+
+fig_5a <- ggplot(df, aes(PC1, PC2, color = id, shape = time)) +
+  geom_point(size = 8, alpha = 0.5) +
+  facet_wrap(~dataset) +
+  scale_color_discrete(guide = "none") +
+  scale_shape_manual(values = c("T1" = 15, "T2" = 16, "T3" = 17, "T4" = 18)) +
+  xlab(vars[1]) + ylab(vars[2]) +
+  theme_minimal(base_size = 50)
+
+
+ggsave(
+      plot = fig_5a,
+      filename = file.path(fig_5_dir, "figure_05a_flow_cytometry_pca.png"),
+      device = ragg::agg_png,
+      width = 18,
+      height = 9,
+      units = "in",
+      dpi = 600
+    )
+
+fig_5a
+```
+
+![](fig_5_files/figure-commonmark/unnamed-chunk-3-1.png)
+
+# 5b
+
+#### Selected Boxplots
+
+### Panel B: Plasmablast Abundance Over Time
+
+``` r
+pop = 'B Cell - Plasmablasts'
+sample_ids_5b <- rownames(flow$data$sampleData)
+sams = (
+  flow$data$sampleData$days_of_prior_antibiotics == 0 &
+    flow$data$sampleData$Condition == "Patient" &
+    as.character(flow$data$sampleData$Subject_ID) != "201455" &
+    !sample_ids_5b %in% c("201455 T1", "201455 T2")
+)
+sd = flow$data$sampleData[sams,]
+dat = data.frame(flow$propsWide[sams,pop],sd)
+colnames(dat)[1] = pop
+dat$time_numeric = as.numeric(gsub("^T(.)","\\1",dat$time))
+
+fig_5b <- ggplot(dat,aes(x=time,y=`B Cell - Plasmablasts`))+
+  geom_boxplot(outlier.shape = NA, size = 0.1)+
+  geom_point(alpha=0.25,size=0.5)+
+  geom_line(aes(group=Subject_ID),alpha=0.3, size = 0.1)+
+  theme_minimal(base_size = 8)+
+  ggtitle("Plasmablasts")+
+  xlab("")+ylab("Proportion of B Cells")
+fig_5b
+```
+
+![](fig_5_files/figure-commonmark/unnamed-chunk-4-1.png)
+
+``` r
+ggsave(
+  file.path(fig_5_dir, "figure_05b_paired_plasmablast_abundance.png"),
+  fig_5b,
+  device = ragg::agg_png,
+  width = 2.25,
+  height = 1.5,
+  units = "in",
+  dpi = 300
+)
+```
+
+# 5c
+
+#### scRNAseq
+
+``` r
+res_0.9 <- readRDS(figure5_umap_object_path)
+DefaultAssay(res_0.9) <- "originalexp"
+
+figure5_cell_type_full_levels <- c(
+  "Progenitor cells",
+  "Classical monocytes",
+  "Intermediate monocytes",
+  "Non classical monocytes",
+  "Myeloid dendritic cells",
+  "Plasmacytoid dendritic cells",
+  "Natural killer cells",
+  "Naive B cells",
+  "Non-switched memory B cells",
+  "Switched memory B cells",
+  "Exhausted B cells",
+  "Plasmablasts",
+  "Naive CD4 T cells",
+  "T regulatory cells",
+  "Th1 cells",
+  "Th2 cells",
+  "Th17 cells",
+  "Follicular helper T cells",
+  "Th1/Th17 cells",
+  "Terminal effector CD4 T cells",
+  "Naive CD8 T cells",
+  "Effector memory CD8 T cells",
+  "Central memory CD8 T cells",
+  "Terminal effector CD8 T cells",
+  "MAIT cells",
+  "Non-Vd2 gd T cells",
+  "Vd2 gd T cells",
+  "Low-density basophils"
+)
+
+figure5_cell_type_short_to_full <- c(
+  "Progenitor" = "Progenitor cells",
+  "Classical mono" = "Classical monocytes",
+  "Int mono" = "Intermediate monocytes",
+  "Non-class mono" = "Non classical monocytes",
+  "Myeloid DCs" = "Myeloid dendritic cells",
+  "pDCs" = "Plasmacytoid dendritic cells",
+  "NK cells" = "Natural killer cells",
+  "Naive B" = "Naive B cells",
+  "Non-switch mem B" = "Non-switched memory B cells",
+  "Switched mem B" = "Switched memory B cells",
+  "Exhausted B" = "Exhausted B cells",
+  "Plasmablasts" = "Plasmablasts",
+  "Naive CD4 T" = "Naive CD4 T cells",
+  "Treg" = "T regulatory cells",
+  "Th1" = "Th1 cells",
+  "Th2" = "Th2 cells",
+  "Th17" = "Th17 cells",
+  "Tfh" = "Follicular helper T cells",
+  "Th1/Th17" = "Th1/Th17 cells",
+  "Temra CD4 T" = "Terminal effector CD4 T cells",
+  "Naive CD8 T" = "Naive CD8 T cells",
+  "Tem CD8 T" = "Effector memory CD8 T cells",
+  "Tcm CD8 T" = "Central memory CD8 T cells",
+  "Temra CD8 T" = "Terminal effector CD8 T cells",
+  "MAIT" = "MAIT cells",
+  "Non-Vd2 gd T" = "Non-Vd2 gd T cells",
+  "Vd2 gd T" = "Vd2 gd T cells",
+  "LD basophils" = "Low-density basophils"
+)
+
+res_0.9@meta.data <- res_0.9@meta.data |>
+  mutate(
+    cell_type_fine_full = recode(
+      as.character(cell_type_fine),
+      !!!figure5_cell_type_short_to_full
+    ),
+    cell_type_fine_full = factor(
+      cell_type_fine_full,
+      levels = figure5_cell_type_full_levels
+    )
+  )
+```
+
+### Panel 5C: PBMC UMAP by Condition and Time
+
+``` r
+fig_5c_cell_type_levels <- c(
+  "Classical mono",
+  "Exhausted B",
+  "Int mono",
+  "MAIT",
+  "Myeloid DCs",
+  "Naive B",
+  "Naive CD4 T",
+  "Naive CD8 T",
+  "NK cells",
+  "Non-class mono",
+  "Non-switch mem B",
+  "Non-Vd2 gd T",
+  "pDCs",
+  "Plasmablasts",
+  "Progenitor",
+  "Switched mem B",
+  "Tcm CD8 T",
+  "Tem CD8 T",
+  "Temra CD4 T",
+  "Temra CD8 T",
+  "Tfh",
+  "Th1",
+  "Th1/Th17",
+  "Th17",
+  "Th2",
+  "Treg",
+  "Vd2 gd T"
+)
+
+fig_5c_cell_type_colors <- scales::hue_pal()(length(fig_5c_cell_type_levels)) |>
+  setNames(fig_5c_cell_type_levels)
+
+fig_5c_cell_type_color_labels <- sprintf(
+  "<span style='color:%s'>%s</span>",
+  fig_5c_cell_type_colors,
+  names(fig_5c_cell_type_colors)
+) |>
+  setNames(names(fig_5c_cell_type_colors))
+
+fig_5c_subset_cell_type_levels <- c(
+  "Non-switch mem B",
+  "Naive B",
+  "Naive CD8 T",
+  "Tfh",
+  "Th1",
+  "Naive CD4 T",
+  "Classical mono",
+  "Vd2 gd T",
+  "Th1/Th17",
+  "MAIT",
+  "Non-Vd2 gd T",
+  "Myeloid DCs"
+)
+
+fig_5c_legend_cell_type_levels <- sort(fig_5c_subset_cell_type_levels)
+
+condition_time_levels <- c(
+  "Control",
+  "Patient_T1",
+  "Patient_T4"
+)
+
+condition_time_labels <- str_replace_all(
+  condition_time_levels,
+  "_",
+  " "
+)
+
+set.seed(111)
+
+Fig5C_df <- res_0.9@meta.data |>
+  base::cbind(res_0.9@reductions$umap@cell.embeddings)
+
+Fig5C_df_subset <- Fig5C_df |>
+  filter(cell_type_fine %in% fig_5c_subset_cell_type_levels)
+
+fig_5c_target_n <- Fig5C_df_subset |>
+  filter(sample %in% c("L211932_T1", "L214612_T1") | Condition == "Patient") |>
+  count(Condition, time) |>
+  pull(n) |>
+  min()
+
+fig_5c_scaling_factors <- Fig5C_df_subset |>
+  filter(sample %in% c("L211932_T1", "L214612_T1") | Condition == "Patient") |>
+  count(Condition, time) |>
+  mutate(scaling_factor = fig_5c_target_n / n)
+
+Fig5C_df <- Fig5C_df_subset |>
+  filter(sample %in% c("L211932_T1", "L214612_T1") | Condition == "Patient") |>
+  group_by(Condition, time, cell_type_fine) |>
+  group_modify(~ {
+    scale_val <- fig_5c_scaling_factors |>
+      filter(Condition == .y$Condition, time == .y$time) |>
+      pull(scaling_factor)
+
+    n_to_sample <- round(nrow(.x) * scale_val)
+
+    slice_sample(.x, n = n_to_sample)
+  }) |>
+  ungroup() |>
+  mutate(
+    cell_type_fine = str_replace_all(cell_type_fine, " cells", ""),
+    condition_time = factor(
+      str_c(Condition, time, sep = "_") |>
+        str_replace("Control.*", "Control") |>
+        str_replace_all("_", " "),
+      levels = condition_time_labels
+    ),
+    cell_type_fine = factor(cell_type_fine, levels = fig_5c_cell_type_levels)
+  )
+
+fig_5c <- ggplot(Fig5C_df, aes(umap_2, umap_1, color = cell_type_fine)) +
+  geom_point(
+    size = 0.3,
+    stroke = 0,
+    shape = 19,
+    key_glyph = ggplot2::draw_key_blank
+  ) +
+  facet_wrap(~ condition_time) +
+  coord_equal() +
+  scale_color_manual(
+    values = fig_5c_cell_type_colors,
+    breaks = fig_5c_legend_cell_type_levels,
+    labels = fig_5c_cell_type_color_labels[fig_5c_legend_cell_type_levels]
+  ) +
+  ggthemes::theme_tufte(base_size = 8, base_family = "Arial") +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") +
+  guides(
+    color = guide_legend(
+      title = NULL,
+      ncol = 4,
+      byrow = TRUE,
+      keywidth = unit(0, "pt"),
+      keyheight = unit(7, "pt"),
+      override.aes = list(size = 0, alpha = 0)
+    )
+  ) +
+  umap_arial_text_min_8 +
+  theme(
+    legend.position = "bottom",
+    legend.location = "panel",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_blank(),
+    legend.text = ggtext::element_markdown(
+      family = "Arial",
+      size = 8,
+      margin = margin(0, 0, 0, 0)
+    ),
+    legend.key = element_blank(),
+    legend.key.width = unit(0, "pt"),
+    legend.key.height = unit(7, "pt"),
+    legend.spacing.x = unit(3, "pt"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(t = 2, r = 0, b = 0, l = 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    legend.box.spacing = unit(0, "pt"),
+    plot.margin = margin(2, 2, 0, 2)
+  )
+
+ggsave(
+  here::here("fig_5_files", "figure_05c_pbmc_umap_condition_time.png"),
+  fig_5c,
+  height = 2.1,
+  width = 4,
+  units = "in",
+  dpi = 600,
+  device = ragg::agg_png,
+  bg = "white"
+)
+
+fig_5c
+```
+
+![](fig_5_files/figure-commonmark/fig_5c-1.png)
+
+# pseudobulk
+
+``` r
+if (file.exists(figure5_pseudobulk_counts_path)) {
+  cts.split.modified <- readRDS(figure5_pseudobulk_counts_path)
+} else {
+  cts <- Seurat::AggregateExpression(
+    res_0.9,
+    group.by = c("cell_type_fine_full", "sample"),
+    slot = "counts",
+    assays = "originalexp",
+    return.seurat = FALSE
+  )$originalexp
+
+  cts.t <- cts |>
+    as.data.frame() |>
+    t() |>
+    as.data.frame()
+
+  cts.split.modified <- cts.t |>
+    split(f = factor(gsub("_.*", "", rownames(cts.t)))) |>
+    purrr::map(
+      ~ .x |>
+        `rownames<-`(str_replace(rownames(.x), "(.*)_(L\\d+)-(T\\d)", "\\2_\\3")) |>
+        t()
+    )
+
+  saveRDS(cts.split.modified, figure5_pseudobulk_counts_path)
+}
+
+participants <- readr::read_csv(
+  here::here("data", "metadata", "sc_sampleData.csv"),
+  show_col_types = FALSE
+) |>
+  mutate(
+    sample = as.character(sample),
+    Subject_ID = factor(Subject_ID),
+    time = relevel(factor(time), ref = "T4")
+  ) |>
+  dplyr::select(sample, Subject_ID, time)
+
+figure5_de_samples <- c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")
+
+if (file.exists(figure5_de_time_path)) {
+  de_time <- readRDS(figure5_de_time_path)
+} else {
+  countData_list <- cts.split.modified |>
+    purrr::keep(~ all(figure5_de_samples %in% colnames(.x))) |>
+    purrr::map(
+      ~ as.data.frame(.x) |>
+        dplyr::select(dplyr::all_of(figure5_de_samples)) |>
+        dplyr::filter(rowSums(.) > 0)
+    )
+
+  colData_list <- countData_list |>
+    purrr::map(
+      ~ participants |>
+        dplyr::filter(sample %in% colnames(.x)) |>
+        dplyr::arrange(match(sample, colnames(.x))) |>
+        tibble::column_to_rownames("sample")
+    )
+
+  stopifnot(
+    all(purrr::map2_lgl(
+      countData_list,
+      colData_list,
+      ~ identical(colnames(.x), rownames(.y))
+    ))
+  )
+
+  time <- purrr::map2(
+    countData_list,
+    colData_list,
+    ~ DESeq2::DESeqDataSetFromMatrix(
+      countData = round(.x),
+      colData = .y,
+      design = ~ Subject_ID + time
+    ) |>
+      DESeq2::DESeq()
+  )
+
+  names(time) <- names(countData_list)
+
+  de_time <- purrr::map_dfr(
+    .x = time,
+    ~ DESeq2::results(.x, contrast = c("time", "T1", "T4")) |>
+      as.data.frame() |>
+      rownames_to_column("ID"),
+    .id = "cell"
+  )
+
+  gene_annotation <- tibble(ID = unique(de_time$ID)) |>
+    mutate(
+      gene = AnnotationDbi::mapIds(
+        org.Hs.eg.db::org.Hs.eg.db,
+        keys = ID,
+        keytype = "ENSEMBL",
+        column = "SYMBOL",
+        multiVals = "first"
+      ),
+      role = AnnotationDbi::mapIds(
+        org.Hs.eg.db::org.Hs.eg.db,
+        keys = ID,
+        keytype = "ENSEMBL",
+        column = "GENENAME",
+        multiVals = "first"
+      ),
+      gene = coalesce(gene, ID),
+      role = coalesce(role, "")
+    )
+
+  de_time <- de_time |>
+    left_join(gene_annotation, by = "ID") |>
+    dplyr::select(cell, gene, ID, role, padj, baseMean, log2FoldChange, lfcSE, stat, pvalue)
+
+  saveRDS(de_time, figure5_de_time_path)
+}
+```
+
+# 5d
+
+### Panel D: Cell-Type Abundance Forest Plot
+
+``` r
+data_time <- res_0.9@meta.data |>
+  filter(sample %in% c("L204127_T1", "L204127_T4", "L204185_T1", "L204185_T4")) |>
+  dplyr::select(cell_type_fine = cell_type_fine_full, Subject_ID, time) 
+
+# making a list of unique cell types in the data
+cell_type <- data_time |> dplyr::distinct(cell_type_fine) |> pluck(1)
+
+# splitting the data by type of cell and 
+# adding a binary variable to each split that indicates whether a row contains that cell type 
+data_time_binary <- map(.x = cell_type,
+                        ~ data_time |> 
+                          mutate(present = case_when(cell_type_fine == .x ~ 1,
+                                                     TRUE ~ 0) |> as.factor(),
+                                 Subject_ID = Subject_ID |> as.factor(),
+                                 time = time |> as.factor() |> relevel(ref = "T4")
+                                 )
+                        )
+
+# building a glm for each cell-type split
+results_time <- map_df(.x = data_time_binary, .id = "cell",
+                       ~ glm(data = .x, present ~ Subject_ID + time, family = binomial) |>
+                         broom::tidy(conf.int = T) |>
+                         filter(term == "timeT1")# the other coef is for Subject_ID level
+                         ) |> 
+  mutate(cell = cell_type)
+
+results_time2 <- results_time |>
+    mutate(cell = cell |>
+           str_replace(pattern = "Non-switched memory B cells", 
+                                   replacement = "NSMB"),
+         cell = cell |>
+           str_replace(pattern = "Terminal effector CD4 T cells", 
+                                   replacement = "TE CD4 T Cells"),
+         cell = cell |>
+           str_replace(pattern = "Myeloid dendritic cells", 
+                                   replacement = "Myeloid DC"),
+         cell = cell |>
+           str_replace(pattern = "Follicular helper T cells", 
+                                   replacement = "FH T cells")
+    ) |> 
+  mutate(`FDR < 0.05` = p.adjust(p.value, "fdr") <= 0.05) |>
+  filter(round(p.value, 2) < 0.05) |> 
+  # filter(`FDR < 0.05` == TRUE) |>
+     mutate(
+     estimate_exp = estimate |> exp(),
+     conf.low_exp = conf.low |> exp(),
+     conf.high_exp = conf.high |> exp(),
+     estimate_log10 = estimate |> exp() |> log10(),
+     conf.low_log10 = conf.low |> exp() |> log10(),
+     conf.high_log10 = conf.high |> exp() |> log10()
+                           ) |> 
+  mutate(effect_size = case_when(estimate_exp > 1 ~ conf.low_exp-1,
+                                 estimate_exp < 1 ~ conf.high_exp-1)) |> 
+  mutate(cell = fct_reorder(cell, estimate_exp))
+
+fig_5d <- results_time2 |> 
+  ggplot(aes(y=cell, x=estimate_exp, xmin=conf.low_exp, xmax=conf.high_exp, color = `FDR < 0.05`
+             )
+         ) +
+  geom_pointrange(shape = 20) +
+  geom_segment(x = 1,
+               xend = 1,
+               y = 0.0,
+               yend = 13,
+               color = "gray") +
+  expand_limits(x = c(0, 2)) +
+  xlab("Odds ratio") +
+  # scale_color_discrete(name = "FDR", labels = c("> 0.05", "< 0.05")) +
+  scale_x_continuous(
+    breaks = c(0, 0.5, 1, 1.5, 2),
+    sec.axis = sec_axis(
+      trans = ~.,
+      breaks = c(0.25, 1, 1.75),
+      labels = c("\u27f5  Enriched at T4", "No change", "Enriched at T1 \u27f6")
+      )
+    ) +
+  geom_text(data = results_time2 |> 
+              filter(estimate_exp >= 1),
+            aes(label = cell, x = conf.high_exp),
+            color = "black",
+            hjust = - 0.01,
+            family = "Arial") +
+  geom_text(data = results_time2 |>
+              filter(estimate_exp <= 1),
+            aes(label = cell, x = conf.low_exp),
+            color = "black",
+            hjust = 1.01,
+            family = "Arial") +
+  ggthemes::theme_tufte() + 
+  theme(
+    text = element_text( #size=16,  
+                        family = "Arial"),
+    axis.text = element_text(color = "black", 
+                             size = 11), # default size of tick labels is 9
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_line(color = "grey"),
+    legend.position = c(0.90, 0.12),
+    axis.line.x.bottom = element_line(color = "grey")
+    )
+
+ ggsave(
+here::here("fig_5_files", "figure_05d_pbmc_cell_type_abundance_forest.png"),
+  fig_5d,
+  device = ragg::agg_png,
+  width = 3.55, 
+  height = 2.5, 
+  units = "in", 
+  res = 300,
+  scaling = 0.7,
+  bg = "white"
+)
+
+fig_5d
+```
+
+![](fig_5_files/figure-commonmark/abundance_time_glm-1.png)
+
+# 5e
+
+### Panel E: Differentially Expressed Gene Counts by Cell Type
+
+``` r
+# total number of significant genes per cell type
+fig_5e <- de_time |> 
+  filter(padj <= 0.05) |> 
+  dplyr::count(cell) |> 
+  mutate(developmental_order = # to arrange by developmental order after n
+           case_when(
+             cell == "Classical monocytes" ~ 1,
+             cell == "Intermediate monocytes" ~ 2,
+             cell == "Myeloid dendritic cells" ~ 3,
+             cell == "Natural killer cells" ~ 4,
+             cell == "Naive B cells" ~ 5,
+             cell == "Plasmablasts" ~ 6,
+             cell == "Switched memory B cells" ~ 7,
+             cell == "Naive CD4 T cells" ~ 8,
+             cell == "Th17 cells" ~ 9
+           )
+         ) |> 
+  arrange(desc(n), developmental_order) |> # arranging by n, then developmental order
+  rownames_to_column() |> # passing the doubly-ordered rows through to the next step 
+  mutate(cell = fct_reorder(cell, rev(rowname))) |>
+  ggplot(aes(x = cell, y = n)) +
+    geom_segment(aes(xend = cell, yend = 0)) +
+    geom_point(size = 4, color= "#e14327") +
+    coord_flip() +
+    xlab("") +
+  ylab("Number of differentially expressed genes") +
+  scale_y_continuous(expand = expansion(mult = 0, add = c(0, 2))) +
+    ggthemes::theme_tufte() +
+  theme(text = element_text( #size=16,  
+    family = "Arial"),
+    axis.text = element_text(color = "black"),
+    axis.ticks.y = element_blank())
+  
+ ggsave(
+here::here("fig_5_files", "figure_05e_pbmc_differential_gene_counts.png"),
+  fig_5e,
+  device = ragg::agg_png,
+  width = 7.5, height = 2.4, units = "in", 
+  res = 300,
+  scaling = 1.2,
+  bg = "white")
+
+fig_5e
+```
+
+![](fig_5_files/figure-commonmark/de_number_plot-1.png)
+
+# 5f
+
+### Panel F: Monocyte Pathway-Level Gene Expression
+
+``` r
+# assign pathways to genes----
+pathways <- data.frame(
+                     stringsAsFactors = FALSE,
+                          check.names = FALSE,
+                                 gene = c("PLAUR","HBEGF","EREG",
+                                          "EGR1","SGK1","BCL2A1","PF4","PPBP",
+                                          "ATF3","NR4A1","IER3","KLF10","MXD1",
+                                          "C5AR1","NAMPT","BTG2","RGS2",
+                                          "RIPK2","NFIL3","IL-8","CCL3L1",
+                                          "CCL3L3","IFITM3","STK17B","CXCL8",
+                                          "TMEM170B","RASGEF1B","ZFP36","GPR183"),
+                       Procoagulation = c(1L,1L,0L,0L,0L,0L,1L,1L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+  Angiogenesis = c(1L,1L,1L,1L,1L,1L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,1L,0L,0L,
+                                          0L,0L),
+           `Int. stress response` = c(0L,0L,0L,1L,1L,0L,0L,0L,
+                                          1L,1L,1L,1L,1L,1L,1L,1L,1L,
+                                          1L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L),
+           `Transcription repression` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,1L,0L,0L,0L,0L,0L,
+                                          0L,1L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+                     `Cell survival` = c(0L,0L,0L,0L,0L,1L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,1L,1L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+  `Alt. mac. polarization` = c(0L,0L,0L,0L,1L,0L,0L,0L,
+                                          0L,1L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L),
+            `Proinflammatory` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L,1L,1L,1L,0L,0L,1L,0L,1L,
+                                          0L,1L),
+               `Interferon-inducible` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,1L,0L,0L,0L,1L,
+                                          0L,0L),
+                            Apoptosis = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,1L,0L,0L,0L,
+                                          1L,0L),
+                  `Signal transduction` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,1L,1L,
+                                          0L,0L),
+                      `mRNA regulation` = c(0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          0L,0L,0L,0L,0L,0L,0L,0L,0L,0L,
+                                          1L,0L)
+)
+  
+# Filter significant genes and ensure distinct entries
+de_time_filtered <- de_time %>%
+  filter(
+    padj < 0.05,
+    cell == "Classical monocytes",
+    gene %in% pathways$gene
+  )
+
+# Sort genes by log2FoldChange
+sorted_genes <- de_time_filtered %>%
+  arrange(log2FoldChange) %>%
+  pull(gene)
+
+# Prepare data for heatmap
+binary_intersection_matrix <- pathways %>%
+  mutate(across(everything(), ~ replace_na(.x, 0))) %>%
+  filter(gene %in% sorted_genes) %>%
+  mutate(gene = factor(gene, levels = sorted_genes)) %>%
+  pivot_longer(cols = -gene, names_to = "pathway", values_to = "membership")
+
+binary_intersection_matrix <- binary_intersection_matrix |> 
+  mutate(pathway = pathway |> factor(levels = 
+      binary_intersection_matrix |> 
+      filter(membership != 0) |> 
+      dplyr::count(pathway) |> 
+      arrange(desc(n)) |> pluck("pathway")
+                                       )
+      )
+
+# Create heatmap
+upset_plot <- 
+  binary_intersection_matrix |> 
+  ggplot(aes(x = pathway, y = gene)) +
+  geom_point(aes(color = factor(membership), shape = factor(membership)), size = 2.5) +
+  scale_color_manual(values = c("0" = "grey90", "1" = "gray10"), guide = "none") +
+  scale_shape_manual(values = c("0" = 20, "1" = 20), guide = "none") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8, color = "black"),
+    axis.text.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  ) 
+
+# Create gene expression plot
+gene_expression_plot <- de_time_filtered %>%
+  mutate(gene = factor(gene, levels = sorted_genes)) %>%
+  ggplot(aes(
+    x = log2FoldChange,
+    y = gene,
+    color = -log10(pvalue),
+    xmin = log2FoldChange - 1.96 * lfcSE,
+    xmax = log2FoldChange + 1.96 * lfcSE
+  )) +
+  geom_point(shape = 19, size = 0.75) +
+  geom_linerange(size = 0.25) +
+ theme(
+    axis.text.y = element_text(size = 6, color = "black"),
+    axis.title.x = element_text(hjust = 0.5, vjust = 36, size = 8),
+    axis.text.x = element_text(size = 8, color = "black"),
+    axis.title.y = element_blank(),
+    axis.line.y = element_blank(), 
+        legend.margin =  margin(0, 0, 0, 0),
+        legend.position = c(0.5, -0.35),
+        legend.direction = "horizontal",
+        legend.title.position = "bottom",
+    legend.title = element_text(hjust = 0.5, vjust = 3, size = 8),
+    plot.margin = margin(0, 5, 0, 0)
+  ) +
+  labs(
+    x = "log2(Fold Change) ± 95% CI",
+    color = "-log10(p-value)"
+  ) +
+geom_segment(x = 0,
+               y = 0,
+               xend = 0,
+               yend = 28,
+               color = "gray") +
+  scale_x_continuous(
+      limits = c(-2.49, 2.49), 
+      expand = c(0, 0),
+      sec.axis = sec_axis(
+      trans = ~.,
+      breaks = c(-1.5, 0, 1.5),
+      labels = c("\u27f5 Up at T4", "No change", "Up at T1 \u27f6")
+      )
+    ) +
+      scale_color_gradient(high = "#132B43", low = "#56B1F7")  # Reverse if using blue shades
+
+# Combine plots
+fig_5f <- gene_expression_plot + upset_plot
+
+fig_5f
+```
+
+![](fig_5_files/figure-commonmark/monocyte_expression_pathway-1.png)
+
+``` r
+# Save the plot
+ggsave(
+  here::here("fig_5_files", "figure_05f_monocyte_pathway_expression.png"),
+  plot = fig_5f,
+  device =  ragg::agg_png,
+  width = 7,
+  height = 3.5,
+  units = "in",
+  dpi = 600
+  )
+
+fig_5f
+```
+
+![](fig_5_files/figure-commonmark/monocyte_expression_pathway-2.png)
+
+``` r
+sessionInfo()
+```
+
+    R version 4.4.1 (2024-06-14 ucrt)
+    Platform: x86_64-w64-mingw32/x64
+    Running under: Windows 11 x64 (build 22631)
+
+    Matrix products: default
+
+
+    locale:
+    [1] LC_COLLATE=English_United States.utf8 
+    [2] LC_CTYPE=English_United States.utf8   
+    [3] LC_MONETARY=English_United States.utf8
+    [4] LC_NUMERIC=C                          
+    [5] LC_TIME=English_United States.utf8    
+
+    time zone: America/Los_Angeles
+    tzcode source: internal
+
+    attached base packages:
+    [1] stats     graphics  grDevices utils     datasets  methods   base     
+
+    other attached packages:
+     [1] Seurat_5.3.0       SeuratObject_5.0.2 sp_2.1-4           patchwork_1.3.0   
+     [5] lubridate_1.9.3    forcats_1.0.0      stringr_1.5.1      dplyr_1.1.4       
+     [9] purrr_1.0.2        readr_2.1.5        tidyr_1.3.1        tibble_3.2.1      
+    [13] ggplot2_4.0.0      tidyverse_2.0.0   
+
+    loaded via a namespace (and not attached):
+      [1] RColorBrewer_1.1-3     jsonlite_1.8.9         shape_1.4.6.1         
+      [4] magrittr_2.0.3         spatstat.utils_3.1-0   jomo_2.7-6            
+      [7] nloptr_2.1.1           farver_2.1.2           rmarkdown_2.29        
+     [10] ragg_1.3.2             vctrs_0.6.5            ROCR_1.0-11           
+     [13] minqa_1.2.8            spatstat.explore_3.3-2 htmltools_0.5.8.1     
+     [16] broom_1.0.6            mitml_0.4-5            sctransform_0.4.1     
+     [19] parallelly_1.38.0      KernSmooth_2.23-24     htmlwidgets_1.6.4     
+     [22] ica_1.0-3              plyr_1.8.9             plotly_4.11.0         
+     [25] zoo_1.8-12             commonmark_1.9.1       igraph_2.0.3          
+     [28] mime_0.12              lifecycle_1.0.4        iterators_1.0.14      
+     [31] pkgconfig_2.0.3        Matrix_1.7-0           R6_2.5.1              
+     [34] fastmap_1.2.0          rbibutils_2.3          fitdistrplus_1.2-1    
+     [37] future_1.34.0          shiny_1.9.1            digest_0.6.37         
+     [40] rprojroot_2.0.4        tensor_1.5             RSpectra_0.16-2       
+     [43] irlba_2.3.5.1          textshaping_0.4.0      labeling_0.4.3        
+     [46] progressr_0.14.0       spatstat.sparse_3.1-0  timechange_0.3.0      
+     [49] httr_1.4.7             polyclip_1.10-7        abind_1.4-5           
+     [52] compiler_4.4.1         here_1.0.1             bit64_4.0.5           
+     [55] withr_3.0.2            S7_0.2.0               backports_1.5.0       
+     [58] fastDummies_1.7.4      pan_1.9                MASS_7.3-60.2         
+     [61] tools_4.4.1            lmtest_0.9-40          httpuv_1.6.15         
+     [64] future.apply_1.11.2    nnet_7.3-19            goftest_1.2-3         
+     [67] glue_1.8.0             nlme_3.1-164           promises_1.3.0        
+     [70] gridtext_0.1.5         grid_4.4.1             Rtsne_0.17            
+     [73] cluster_2.1.6          reshape2_1.4.4         generics_0.1.3        
+     [76] gtable_0.3.6           spatstat.data_3.1-2    tzdb_0.4.0            
+     [79] data.table_1.15.4      hms_1.1.3              xml2_1.3.6            
+     [82] spatstat.geom_3.3-3    RcppAnnoy_0.0.22       markdown_1.13         
+     [85] ggrepel_0.9.5          RANN_2.6.2             foreach_1.5.2         
+     [88] pillar_1.10.1          vroom_1.6.5            spam_2.10-0           
+     [91] RcppHNSW_0.6.0         later_1.3.2            splines_4.4.1         
+     [94] ggtext_0.1.2           lattice_0.22-6         bit_4.0.5             
+     [97] survival_3.6-4         deldir_2.0-4           tidyselect_1.2.1      
+    [100] miniUI_0.1.1.1         pbapply_1.7-2          knitr_1.49            
+    [103] reformulas_0.4.3.1     gridExtra_2.3          scattermore_1.2       
+    [106] xfun_0.48              matrixStats_1.4.1      stringi_1.8.4         
+    [109] boot_1.3-30            lazyeval_0.2.2         yaml_2.3.10           
+    [112] evaluate_1.0.1         codetools_0.2-20       cli_3.6.3             
+    [115] rpart_4.1.23           uwot_0.2.2             systemfonts_1.1.0     
+    [118] Rdpack_2.6.4           xtable_1.8-4           reticulate_1.38.0     
+    [121] Rcpp_1.0.13            globals_0.16.3         spatstat.random_3.3-2 
+    [124] png_0.1-8              spatstat.univar_3.0-1  parallel_4.4.1        
+    [127] dotCall64_1.1-1        lme4_2.0-1             listenv_0.9.1         
+    [130] glmnet_4.1-10          ggthemes_5.1.0         viridisLite_0.4.2     
+    [133] scales_1.4.0           ggridges_0.5.6         crayon_1.5.3          
+    [136] rlang_1.1.4            cowplot_1.1.3          mice_3.17.0           

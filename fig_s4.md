@@ -1,0 +1,467 @@
+# Figure S4
+
+
+``` r
+features <- readxl::read_excel(
+  community_wb_path,
+  sheet = "Correlations"
+)
+
+communities <- readxl::read_excel(
+  community_wb_path,
+  sheet = "Communities"
+)
+
+olink_immune <- readr::read_csv(
+  here::here("data", "processed", "01_proteomics_metabolomics", "olink_immune.csv"),
+  show_col_types = FALSE
+)
+
+olink_physiologic <- readr::read_csv(
+  here::here("data", "processed", "01_proteomics_metabolomics", "olink_physiologic.csv"),
+  show_col_types = FALSE
+)
+
+metabolites <- readr::read_csv(
+  here::here("data", "processed", "01_proteomics_metabolomics", "metabolites.csv"),
+  show_col_types = FALSE
+)
+```
+
+## Panel A
+
+``` r
+membership_t1 <- communities |>
+  dplyr::count(Community_T1) |>
+  dplyr::arrange(dplyr::desc(n)) |>
+  dplyr::filter(!is.na(Community_T1)) |>
+  dplyr::mutate(
+    community_size_label = dplyr::if_else(dplyr::row_number() <= 3, as.character(n), NA_character_)
+  ) |>
+  ggplot(aes(x = as.character(Community_T1) |> forcats::fct_inorder(), y = n)) +
+  geom_col() +
+  geom_text(
+    aes(label = community_size_label),
+    color = "white",
+    vjust = 1.15,
+    size = 10 / ggplot2::.pt,    na.rm = TRUE
+  ) +
+  xlab("Community identity") +
+  ylab("Community size") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+membership_t1
+```
+
+![](fig_s4_files/figure-commonmark/community_sizes-1.png)
+
+``` r
+ggsave(
+  here::here("fig_s4_files", "figure_S04a_interomic_community_sizes.png"),
+  membership_t1,
+  device = ragg::agg_png,
+  width = 6,
+  height = 1.5,
+  units = "in",
+  dpi = 300
+)
+```
+
+## Panel B
+
+``` r
+network_label_lookup <- tibble::tibble(
+  analyte_label = unique(c(
+    names(olink_immune)[-1],
+    names(olink_physiologic)[-1],
+    names(metabolites)[-1]
+  ))
+) |>
+  dplyr::mutate(
+    analyte_key = make.names(analyte_label) |>
+      stringr::str_remove("^X(?=\\d)")
+  )
+
+community_network_nodes <- communities |>
+  dplyr::filter(Community_T1 %in% c(1, 3, 4)) |>
+  dplyr::transmute(
+    name = Node,
+    analyte_key = stringr::str_remove(Node, "^(prots|mets)\\."),
+    analyte_type = dplyr::if_else(
+      stringr::str_starts(Node, "mets."),
+      "Metabolite",
+      "Protein"
+    ),
+    Community = factor(Community_T1, levels = c(1, 3, 4))
+  ) |>
+  dplyr::left_join(network_label_lookup, by = "analyte_key") |>
+  dplyr::mutate(
+    analyte_label = dplyr::coalesce(
+      analyte_label,
+      analyte_key |>
+        stringr::str_replace_all("\\.+", " ") |>
+        stringr::str_squish()
+    ),
+    analyte_label = analyte_label |>
+      stringr::str_replace("^PDGF subunit B$", "PDGFB")
+  ) |>
+  dplyr::select(name, Community, analyte_type, analyte_label)
+
+community_network_edges <- features |>
+  dplyr::filter(
+    p.adjust_T1 < 0.05,
+    Feature1 %in% community_network_nodes$name,
+    Feature2 %in% community_network_nodes$name
+  ) |>
+  dplyr::distinct(Feature1, Feature2, .keep_all = TRUE) |>
+  dplyr::transmute(
+    from = Feature1,
+    to = Feature2,
+    rho = R_T1,
+    edge_weight = abs(R_T1)
+  )
+
+community_network_graph <- igraph::graph_from_data_frame(
+  d = community_network_edges,
+  directed = FALSE,
+  vertices = community_network_nodes
+)
+
+set.seed(123)
+community_network_layout <- igraph::layout_with_fr(
+  community_network_graph,
+  weights = igraph::E(community_network_graph)$edge_weight
+)
+
+community_network_plot_nodes <- igraph::as_data_frame(
+  community_network_graph,
+  what = "vertices"
+) |>
+  tibble::as_tibble() |>
+  dplyr::mutate(
+    x = community_network_layout[, 1],
+    y = community_network_layout[, 2],
+    degree = igraph::degree(community_network_graph, v = name)
+  )
+
+# Label the most connected metabolites in each community. Communities with
+# fewer than six metabolites retain all metabolite labels.
+community_network_labels <- community_network_plot_nodes |>
+  dplyr::filter(analyte_type == "Metabolite") |>
+  dplyr::group_by(Community) |>
+  dplyr::slice_max(degree, n = 6, with_ties = FALSE) |>
+  dplyr::ungroup() |>
+  dplyr::pull(name)
+
+# Orient the deterministic force-directed layout consistently: Community 4
+# is placed to the right, with Community 1 above Community 3. These rigid
+# transformations do not alter the network geometry.
+community_centroids <- community_network_plot_nodes |>
+  dplyr::group_by(Community) |>
+  dplyr::summarise(x = mean(x), y = mean(y), .groups = "drop")
+
+left_centroid <- community_centroids |>
+  dplyr::filter(Community %in% c("1", "3")) |>
+  dplyr::summarise(x = mean(x), y = mean(y))
+
+right_centroid <- community_centroids |>
+  dplyr::filter(Community == "4")
+
+layout_angle <- atan2(
+  right_centroid$y - left_centroid$y,
+  right_centroid$x - left_centroid$x
+)
+
+community_network_plot_nodes <- community_network_plot_nodes |>
+  dplyr::mutate(
+    x_rotated = x * cos(layout_angle) + y * sin(layout_angle),
+    y_rotated = -x * sin(layout_angle) + y * cos(layout_angle),
+    x = x_rotated - mean(x_rotated),
+    y = y_rotated - mean(y_rotated)
+  ) |>
+  dplyr::select(-x_rotated, -y_rotated)
+
+oriented_centroids <- community_network_plot_nodes |>
+  dplyr::group_by(Community) |>
+  dplyr::summarise(y = mean(y), .groups = "drop")
+
+if (
+  oriented_centroids$y[oriented_centroids$Community == "1"] <
+    oriented_centroids$y[oriented_centroids$Community == "3"]
+) {
+  community_network_plot_nodes <- community_network_plot_nodes |>
+    dplyr::mutate(y = -y)
+}
+
+igraph::V(community_network_graph)$display_label <- dplyr::if_else(
+  igraph::V(community_network_graph)$name %in% community_network_labels,
+  igraph::V(community_network_graph)$analyte_label,
+  NA_character_
+)
+
+community_network <- ggraph::ggraph(
+  community_network_graph,
+  layout = "manual",
+  x = community_network_plot_nodes$x,
+  y = community_network_plot_nodes$y
+) +
+  ggforce::geom_mark_ellipse(                                            # Enclose each community with an ellipse.
+    data = community_network_plot_nodes,                                 # Use the table containing node coordinates and communities.
+    aes(x = x, y = y, group = Community),                               # Position nodes and draw one enclosure per community.
+    inherit.aes = FALSE,                                                 # Use only the mappings declared in this layer.
+    fill = NA,                                                           # Leave community enclosures unfilled.
+    colour = "grey65",                                                  # Draw enclosure outlines in medium grey.
+    linetype = "dashed",                                                # Distinguish enclosures with dashed outlines.
+    linewidth = 0.35,                                                    # Set the enclosure outline thickness.
+    expand = grid::unit(2.5, "mm"),                                     # Add clearance between nodes and enclosure outlines.
+    show.legend = FALSE                                                  # Exclude enclosure styling from the legend.
+  ) +                                                                    # Add the enclosure layer to the plot.
+  ggraph::geom_edge_link(                                                # Draw protein-metabolite correlation edges.
+    aes(alpha = edge_weight),                                            # Map absolute correlation strength to edge opacity.
+    colour = "grey75",                                                  # Draw edges in light grey.
+    linewidth = 0.5,                                                    # Set a constant edge thickness.
+    show.legend = FALSE                                                  # Suppress a separate edge-opacity legend.
+  ) +                                                                    # Add the edge layer to the plot.
+  ggraph::geom_node_point(                                               # Draw one point for each analyte node.
+    aes(fill = Community),                                               # Color node interiors by community membership.
+    shape = 21,                                                          # Use a circle that supports separate fill and outline colors.
+    size = 2,                                                            # Set the node diameter.
+    stroke = 0,                                                          # Remove the node outline.
+    colour = "white",
+    alpha = 0.6                                                    # Define the unused outline color as white.
+  ) +                                                                    # Add the node layer above the edges.
+  ggraph::geom_node_text(                                                # Add labels to the selected metabolite nodes.
+    aes(filter = !is.na(display_label), label = display_label),          # Label only nodes assigned a display label.
+    repel = TRUE,                                                        # Move labels to reduce overlap.
+    size = 2,                                                            # Set label text size in millimetres.
+    lineheight = 0.9,                                                    # Tighten spacing in multiline labels.
+    box.padding = 0.25,                                                  # Keep repelled labels apart from one another.
+    point.padding = 0.15,                                                # Keep labels away from their associated nodes.
+    segment.colour = "grey65",                                          # Color label-to-node connector segments grey.
+    segment.size = 0.2,                                                  # Set connector-segment thickness.
+    max.overlaps = Inf,                                                  # Retain every selected label regardless of crowding.
+    show.legend = FALSE                                                  # Exclude text labels from the legend.
+  ) +                                                                    # Add the label layer above the nodes.
+  scale_fill_manual(                                                     # Define the discrete community color scale.
+    values = c("1" = "#F8766D", "3" = "#00BA38", "4" = "#619CFF"),    # Assign fixed colors to Communities 1, 3, and 4.
+    drop = FALSE                                                         # Keep every defined community in the legend.
+  ) +                                                                    # Apply the manual node-fill scale.
+  scale_edge_alpha_continuous(range = c(0.35, 0.85), guide = "none") +  # Restrict edge opacity and omit its guide.
+  coord_equal(clip = "off") +                                           # Preserve geometry and allow labels beyond the panel.
+  theme_void(base_size = 8) +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    legend.position = c(0.11, -0.01),
+    legend.justification = c(1, 0),
+    legend.direction = "vertical",
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.key.spacing.y = unit(0, "mm"),
+    legend.key.height = unit(1, "mm"),
+    plot.margin = margin(t= 12, b = 5, r = 0, l = 0)
+  ) +
+  guides(fill = guide_legend(override.aes = list(size = 3))) +
+  labs(fill = "Community")
+
+community_network
+```
+
+![](fig_s4_files/figure-commonmark/community_network-1.png)
+
+``` r
+ggsave(
+  here::here("fig_s4_files", "figure_S04b_interomic_community_network.png"),
+  community_network,
+  device = ragg::agg_png,
+  width = 4,
+  height = 4,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+```
+
+## Panel C
+
+``` r
+load(here::here("data", "raw", "01_proteomics_metabolomics", "OlinkPreprocessed.RData"))
+
+# Exclude the 35-EM patient. Comment this block out to include them.
+# data$sampleData <- data$sampleData |>
+#   dplyr::filter(
+#     as.character(Subject_ID) != "201455",
+#     !as.character(sample) %in% c("201455 T1", "201455 T2")
+#   )
+
+sampleData <- data$sampleData
+
+# The published panel is a selected biological view rather than a complete
+# within-community correlation matrix. Values, p-values, and ordering remain
+# data-derived; this table only declares the analytes displayed.
+s4c_panel_analytes <- tibble::tribble(
+  ~analysis_group, ~analyte_name,
+  "IFN-IDO1 axis", "CXCL11",
+  "IFN-IDO1 axis", "CXCL10",
+  "IFN-IDO1 axis", "CXCL9",
+  "IFN-IDO1 axis", "MIP-1 alpha",
+  "IFN-IDO1 axis", "quinolinate",
+  "Metabolic context", "3-hydroxybutyrate (BHBA)",
+  "Metabolic context", "palmitoleate (16:1n7)",
+  "Endothelial protection", "sphingosine 1-phosphate",
+  "Endothelial protection", "ANGPT1",
+  "Endothelial protection", "PDGF subunit B"
+)
+
+analytes <- sampleData |>
+  dplyr::filter(
+    time == "T1",
+    Condition == "Patient"
+  ) |>
+  dplyr::inner_join(olink_immune |> dplyr::rename(sample = 1)) |>
+  dplyr::inner_join(
+    olink_physiologic |> dplyr::rename(sample = 1),
+    by = dplyr::join_by(sample == sample)
+  ) |>
+  dplyr::inner_join(metabolites |> dplyr::rename(sample = 1))
+
+missing_s4c_analytes <- base::setdiff(
+  s4c_panel_analytes$analyte_name,
+  colnames(analytes)
+)
+
+if (length(missing_s4c_analytes) > 0) {
+  stop(
+    "Figure S4C analytes missing from the joined data: ",
+    paste(missing_s4c_analytes, collapse = ", ")
+  )
+}
+```
+
+``` r
+community_1_analytes <- s4c_panel_analytes$analyte_name
+
+community_1_symptoms <- data$directSymptoms[analytes$sample, , drop = FALSE] |>
+  dplyr::mutate(dplyr::across(dplyr::everything(), as.numeric)) |>
+  dplyr::mutate(`Avg. Symptom Score` = rowMeans(dplyr::across(dplyr::everything()), na.rm = TRUE)) |>
+  dplyr::select(`Avg. Symptom Score`) |>
+  tibble::rownames_to_column("sample")
+
+community_1_corrplot_data <- analytes |>
+  dplyr::select(sample, dplyr::all_of(community_1_analytes)) |>
+  dplyr::inner_join(community_1_symptoms, by = "sample") |>
+  dplyr::select(sample, `Avg. Symptom Score`, dplyr::all_of(community_1_analytes)) |>
+  tibble::column_to_rownames("sample") |>
+  dplyr::mutate(dplyr::across(dplyr::everything(), as.numeric))
+
+community_1_corrplot_result <- Hmisc::rcorr(
+  as.matrix(community_1_corrplot_data),
+  type = "spearman"
+)
+
+community_1_corrplot_r <- community_1_corrplot_result$r
+community_1_corrplot_p <- community_1_corrplot_result$P
+
+community_1_corrplot_labels <- colnames(community_1_corrplot_r) |>
+  stringr::str_replace("^Avg\\. Symptom Score$", "Avg. Symptom") |>
+  stringr::str_replace("^MIP-1 alpha$", "MIP-1-alpha") |>
+  stringr::str_replace("^3-hydroxybutyrate \\(BHBA\\)$", "BHBA") |>
+  stringr::str_replace("^palmitoleate \\(16:1n7\\)$", "palmitoleate") |>
+  stringr::str_replace("^sphingosine 1-phosphate$", "sphingosine 1-p") |>
+  stringr::str_squish()
+
+dimnames(community_1_corrplot_r) <- list(
+  community_1_corrplot_labels,
+  community_1_corrplot_labels
+)
+dimnames(community_1_corrplot_p) <- list(
+  community_1_corrplot_labels,
+  community_1_corrplot_labels
+)
+
+ragg::agg_png(
+  here::here("fig_s4_files", "figure_S04c_community_member_correlation_matrix.png"),
+  width = 4,
+  height = 4,
+  units = "in",
+  res = 300
+)
+
+corrplot::corrplot(
+  community_1_corrplot_r,
+  method = "circle",
+  type = "upper",
+  order = "original",
+  col = colorRampPalette(c("blue", "white", "red"))(200),
+  diag = FALSE,
+  tl.col = "black",
+  tl.cex = 0.7,
+  tl.offset = 0.4,
+  tl.srt = 90,
+  cl.cex = 0.6,
+  cl.ratio = 0.09,
+  p.mat = community_1_corrplot_p,
+  sig.level = c(0.001, 0.01, 0.05),
+  insig = "label_sig",
+  pch.col = "black",
+  pch.cex = 0.7,
+  mar = c(0, 0, 0, 0)
+)
+
+grDevices::dev.off() |> invisible()
+```
+
+``` r
+sessionInfo()
+```
+
+    R version 4.4.1 (2024-06-14 ucrt)
+    Platform: x86_64-w64-mingw32/x64
+    Running under: Windows 11 x64 (build 22631)
+
+    Matrix products: default
+
+
+    locale:
+    [1] LC_COLLATE=English_United States.utf8 
+    [2] LC_CTYPE=English_United States.utf8   
+    [3] LC_MONETARY=English_United States.utf8
+    [4] LC_NUMERIC=C                          
+    [5] LC_TIME=English_United States.utf8    
+
+    time zone: America/Los_Angeles
+    tzcode source: internal
+
+    attached base packages:
+    [1] stats     graphics  grDevices utils     datasets  methods   base     
+
+    other attached packages:
+     [1] ggforce_0.4.2    ggraph_2.2.2     igraph_2.0.3     corrplot_0.95   
+     [5] Hmisc_5.1-3      here_1.0.1       conflicted_1.2.0 lubridate_1.9.3 
+     [9] forcats_1.0.0    stringr_1.5.1    dplyr_1.1.4      purrr_1.0.2     
+    [13] readr_2.1.5      tidyr_1.3.1      tibble_3.2.1     ggplot2_4.0.0   
+    [17] tidyverse_2.0.0  readxl_1.4.3    
+
+    loaded via a namespace (and not attached):
+     [1] gtable_0.3.6       xfun_0.48          htmlwidgets_1.6.4  ggrepel_0.9.5     
+     [5] tzdb_0.4.0         vctrs_0.6.5        tools_4.4.1        generics_0.1.3    
+     [9] parallel_4.4.1     cluster_2.1.6      pkgconfig_2.0.3    data.table_1.15.4 
+    [13] checkmate_2.3.2    RColorBrewer_1.1-3 S7_0.2.0           lifecycle_1.0.4   
+    [17] compiler_4.4.1     farver_2.1.2       textshaping_0.4.0  graphlayouts_1.1.1
+    [21] htmltools_0.5.8.1  yaml_2.3.10        htmlTable_2.4.3    Formula_1.2-5     
+    [25] crayon_1.5.3       pillar_1.10.1      MASS_7.3-60.2      cachem_1.1.0      
+    [29] viridis_0.6.5      rpart_4.1.23       tidyselect_1.2.1   digest_0.6.37     
+    [33] stringi_1.8.4      labeling_0.4.3     polyclip_1.10-7    rprojroot_2.0.4   
+    [37] fastmap_1.2.0      grid_4.4.1         colorspace_2.1-1   cli_3.6.3         
+    [41] magrittr_2.0.3     base64enc_0.1-3    tidygraph_1.3.1    foreign_0.8-86    
+    [45] withr_3.0.2        scales_1.4.0       backports_1.5.0    bit64_4.0.5       
+    [49] timechange_0.3.0   rmarkdown_2.29     bit_4.0.5          nnet_7.3-19       
+    [53] gridExtra_2.3      cellranger_1.1.0   ragg_1.3.2         hms_1.1.3         
+    [57] memoise_2.0.1      evaluate_1.0.1     knitr_1.49         viridisLite_0.4.2 
+    [61] rlang_1.1.4        Rcpp_1.0.13        glue_1.8.0         tweenr_2.0.3      
+    [65] vroom_1.6.5        rstudioapi_0.16.0  jsonlite_1.8.9     R6_2.5.1          
+    [69] systemfonts_1.1.0  fs_1.6.6          
