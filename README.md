@@ -11,7 +11,9 @@ Keywords: Lyme disease, *Borrelia burgdorferi*, PBMC, skin, endothelium, multiom
 
 ## About
 
-This repository contains the scripts for generating the manuscript figures and the preprocessing workflows. The companion Zenodo release supplies the figure-ready objects, selected intermediate caches, and the HIPAA safe-harbor compliant metadata required by those scripts.
+This repository contains the scripts for generating the manuscript figures and the preprocessing workflows. The companion Zenodo release supplies the objects used to generate figures, selected intermediate caches, and the metadata required by those scripts, prepared in accordance with the HIPAA Safe Harbor standard.
+
+Together, these resources are intended to reproduce the analyses and figures reported in this study and are not intended as a general purpose analysis package for arbitrary user-supplied datasets.
 
 ## Overall categories
 
@@ -34,7 +36,7 @@ The assets are allocated as follows:
   - `Proteomics_Metabolomics_scRNAseq_Processed.zip` contains the top-level `processed/`, `intermediate/`, and `metadata/` directories.
   - `Flow_Data_and_Preprocessing.zip` (89 GB) contains the raw flow cytometry data and its preprocessing workflow. It is self-contained and is not extracted into the hierarchy below.
 
-The two non-flow cytometry archives are complementary. Extract both directly into the repository's `data/` directory and not into a subdirectory or into an automatically-named directory created by the default extraction behavior of your operating system. The directory tree shown below shows the paths and folder names compatible with the latest release of the data and scripts. Older paths and folder names from previous releases are not supported.
+The two archives other than the flow cytometry archive are complementary. Extract both directly into the repository's `data/` directory and not into a subdirectory or into an automatically named directory created by the default extraction behavior of your operating system. The directory tree shown below shows the paths and folder names compatible with the latest release of the data and scripts. Older paths and folder names from previous releases are not supported.
 
 ```
 Lyme/
@@ -44,65 +46,117 @@ Lyme/
 │
 ├── scripts/                              ----On GitHub----
 │   ├── 02_internal_pbmc_scrna/           # PBMC scRNA-seq of our cohort
-│   │   └── lyme.Rmd                      # PBMC preprocessing and downstream-analysis source
+│   │   └── 01_pbmc_preprocessing.Rmd     # PBMC preprocessing and downstream analysis
 │   └── 03_public_skin_rna/               # Public skin RNA preprocessing
-│       └── scRNAseq EM.R                 # GSE169440 integration and broad annotation
+│       ├── 01a_prepare_public_expression_data.R
+│       ├── 01b_integrate_and_annotate_GSE169440.R
+│       └── 02_test_GSE169440_subpopulations.R
 │
 ├── data/                               
 │   ├── raw/                              ----On Zenodo----
 │   │   ├── 01_proteomics_metabolomics/   # OlinkPreprocessed.RData (cohort multiomics input)
 │   │   ├── 02_internal_pbmc_scrna/       # 10x/<sample>/ triplets
 │   │   ├── 03_public_skin_rna/           # GSE169440/<sample>_GEX_HHT_cellranger/filtered_feature_bc_matrix
-│   │   └── 04_integrative_modeling/      # Published comparison-panel tables
+│   │   └── 04_integrative_modeling/      # Published tables used for comparison panels
 │   │
 │   ├── processed/                        ----On Zenodo----
-│   │   ├── 01_proteomics_metabolomics/   # Data.RData and figure-ready matrices
-│   │   ├── 02_internal_pbmc_scrna/       # Integrated and annotated Seurat objects; time-DE cache
-│   │   ├── 03_public_skin_rna/           # Preprocessed public skin/PBMC transcriptomic data and figure-ready abundance tables
+│   │   ├── 01_proteomics_metabolomics/   # Data.RData and matrices used to generate figures
+│   │   ├── 02_internal_pbmc_scrna/       # Integrated and annotated Seurat objects; cache of differential expression results over time
+│   │   ├── 03_public_skin_rna/           # Preprocessed public skin/PBMC transcriptomic data and abundance tables used to generate figures
 │   │   └── 04_integrative_modeling/      # Cached model evaluation tables
 │   │
 │   ├── metadata/                         ----On Zenodo----
 │   │   ├── sampleData.csv                # Primary cohort clinical metadata
-│   │   └── sc_sampleData.csv             # scRNA-seq library-to-patient map
+│   │   └── sc_sampleData.csv             # scRNA-seq map between libraries and patients
 │   │
 │   └── intermediate/                     ----On Zenodo----
 │       ├── 01_proteomics_metabolomics/   # FELLA graph and PageRank caches
-│       ├── 02_internal_pbmc_scrna/       # SCE, Monaco-prediction, and pseudobulk caches
+│       ├── 02_internal_pbmc_scrna/       # SCE, Monaco prediction, and pseudobulk caches
 │       ├── 03_public_skin_rna/           # ncells.RData, SubCluster_Labels.RData, Public Data Limma.RData
 │       ├── 04_integrative_modeling/      # T1_T3_Multiomics_Community_Results.xlsx and cached model/figure inputs
 │       └── flow_gating/                  # bcell, tcell, monocyte, dcnk.RData
 ```
 
-### Preprocessing scope
+### Preprocessing scripts and their scope
 
-Figure S12 uses `publicDataClean.RData`, `xCell_Labels.csv`, and `GSE169440_subpopulation_abundance.csv` under `data/processed/03_public_skin_rna/`. The compact abundance table contains the figure-ready public-skin cell counts without the much larger single-cell object.
+The files in the `scripts/` directory document the preprocessing workflows and analytical choices used to create intermediate and processed objects. They are not intended to regenerate every deposited cache from raw data.
 
-The PBMC preprocessing script, `Lyme.Rmd`, documents the 10x-to-Seurat workflow and downstream analyses. Zenodo hosts intermediate and processed objects generated by this preprocessing script and consumed by the downstream figure scripts. It is not a one-command rebuild of every cache: in particular, the  `Lyme.Rmd` does not currently serialize the final annotated Seurat object, so that object is supplied directly in the Zenodo data release. 
+The script
+`scripts/02_internal_pbmc_scrna/01_pbmc_preprocessing.Rmd`
+documents the import, integration, annotation, and downstream analyses of PBMC sequencing data from our cohort.
 
-The skin preprocessing script generates `combined3.RData` and `ncells.RData`. `SubCluster_Labels.RData` and `Public Data Limma.RData` are supplied downstream objects from the original analyses.
+The three scripts inside `scripts/03_public_skin_rna/` prepare public transcriptomic data and integrate GSE169440 to annotate cell subpopulations in unaffected skin and erythema migrans lesions.
+
+## System requirements
+
+The following environment was tested:
+
+- Windows 11 x64 (build 22631).
+- R 4.3.
+- Quarto 1.9.37.
+
+The R packages used across the figure and preprocessing scripts are listed below. Individual scripts use subsets of this list.
+
+- Core and reporting: `pacman`, `here`, `fs`, `knitr`, `ragg`, `systemfonts`, `rsvg`, `rasterpdf`, `DiagrammeR`, `DiagrammeRsvg`, `datapasta`, `openxlsx`, `officer`, `flextable`, `DT`.
+- Data handling: `tidyverse`, `dplyr`, `tidyr`, `tibble`, `readr`, `readxl`, `purrr`, `forcats`, `stringr`, `rlang`, `magrittr`, `janitor`, `plyr`, `broom`, `matrixStats`, `conflicted`.
+- Plotting and networks: `ggplot2`, `ggrepel`, `ggstance`, `gghighlight`, `ggnewscale`, `geomtextpath`, `ggbump`, `ggforce`, `ggtext`, `ggthemes`, `ggprism`, `ggpubr`, `ggplotify`, `ggsignif`, `patchwork`, `cowplot`, `camcorder`, `colorspace`, `RColorBrewer`, `circlize`, `ComplexHeatmap`, `pheatmap`, `corrplot`, `factoextra`, `ggraph`, `scales`, `igraph`, `UpSetR`, `VennDiagram`.
+- Statistics and modeling: `Hmisc`, `psych`, `emmeans`, `lmtest`, `lme4`, `lmerTest`, `MASS`, `mice`, `impute`, `caret`, `e1071`, `glmnet`, `glmmLasso`, `pROC`, `stringdist`, `Matrix.utils`, `WGCNA`, `progress`, `future`, `furrr`, `progressr`.
+- Bioinformatics: `DESeq2`, `limma`, `edgeR`, `sva`, `BiocParallel`, `AnnotationDbi`, `org.Hs.eg.db`, `clusterProfiler`, `enrichplot`, `enrichR`, `DOSE`, `msigdbr`, `FELLA`, `KEGGREST`, `GEOquery`, `DropletUtils`, `multtest`, `metap`, `scCATCH`, `SingleR`, `celldex`, `ROntoTools`, `lemur`, `Seurat`, `SingleCellExperiment`, `SummarizedExperiment`, `flowCore`, `flowStats`, `xCell`, `venn`.
+- External lookups: `rentrez`, `webchem`.
+
+Exact package versions are recorded by `sessionInfo()` at the end of each figure script and preprocessing workflow.
+
+### Hardware and resource requirements
+
+No specialized hardware is required for routine figure rendering or for the representative Figure 2 demo.
+The main exceptions are the full flow cytometry analysis, whose archive is approximately 89 GB before extraction, and the optional full refit in `fig_s5.qmd`, which can use up to 24 CPU cores. Routine rendering uses the supplied cached results unless the parameter that enables a full refit is selected.
 
 ## Quick start
 
-To reproduce the analysis, the code from GitHub must be combined with the data from Zenodo.
+No standalone software package was developed for this study. To reproduce the analysis, combine the code from GitHub with the data from Zenodo:
 
-1. Clone the repository
-```
-git clone https://github.com/subramanian-group/Lyme.git
-cd Lyme
-```
-2. Download `Proteomics_Metabolomics_scRNAseq_Raw.zip` and `Proteomics_Metabolomics_scRNAseq_Processed.zip` from the [latest Zenodo data release](https://doi.org/10.5281/zenodo.15395686). Download `Flow_Data_and_Preprocessing.zip` only when rendering Figure 6d, e and Supplementary Figure 7, which require the raw flow cytometry data and its standalone preprocessing workflow. 
+1. Install R 4.3, Quarto 1.9.37, and the required R packages listed above. Use CRAN or Bioconductor where available and the package's official source repository otherwise. RStudio is optional. Typical installation time is approximately 30 minutes on a normal desktop computer, excluding data download time.
 
-3. Extract `Proteomics_Metabolomics_scRNAseq_Raw.zip` and `Proteomics_Metabolomics_scRNAseq_Processed.zip` directly into `data/`. After extraction, the repository must contain `data/raw/`, `data/processed/`, `data/intermediate/`, and `data/metadata/`; an extra wrapper directory indicates an incorrect extraction. Keep the flow cytometry archive separate. The four small derived gating objects used by the figure scripts, except  `fig_6.qmd` and `fig_s7.qmd`,   are already supplied under `data/intermediate/flow_gating/`.
+2. Clone the repository:
+
+   ```text
+   git clone https://github.com/subramanian-group/Lyme.git
+   cd Lyme
+   ```
+
+3. Download `Proteomics_Metabolomics_scRNAseq_Raw.zip` and `Proteomics_Metabolomics_scRNAseq_Processed.zip` from the [latest Zenodo data release](https://doi.org/10.5281/zenodo.15395686). Download `Flow_Data_and_Preprocessing.zip` only when rendering Figure 6d, e and Supplementary Figure 7, which require the raw flow cytometry data and its standalone preprocessing workflow.
+
+4. Extract `Proteomics_Metabolomics_scRNAseq_Raw.zip` and `Proteomics_Metabolomics_scRNAseq_Processed.zip` directly into `data/`. After extraction, the repository must contain `data/raw/`, `data/processed/`, `data/intermediate/`, and `data/metadata/`; an extra wrapper directory indicates an incorrect extraction. Keep the flow cytometry archive separate. The four small derived gating objects used by the figure scripts, except `fig_6.qmd` and `fig_s7.qmd`, are already supplied under `data/intermediate/flow_gating/`.
 
    `fig_6.qmd` and `fig_s7.qmd` also use assets from the standalone flow cytometry archive. When rendering Figure 6d, e and Supplementary Figure 7, place the files extracted from `Flow_Data_and_Preprocessing.zip` into a `Flow/` directory under `data/`.
 
-4. To render a figure, open the corresponding `.qmd` file (for example, `fig_3.qmd`) in RStudio and click `Render`. Paths used by the figure scripts in the latest release are relative to the repository root.
+   Download and extraction of the Zenodo archives takes approximately 30 minutes on a 1-Gbps connection.
 
-## Software requirements
+5. From a system terminal opened in the repository root, run:
 
-- R (>= 4.1.0).
-- Key R packages: `Seurat`, `DESeq2`, `limma`, `glmmLasso`, `igraph`, `tidyverse`.
-- Detailed session information is included at the end of each script.
+   ```text
+   quarto render fig_2.qmd
+   ```
+
+   Use PowerShell or Command Prompt on Windows, or Bash or Zsh on macOS/Linux. The Terminal tab in RStudio may also be used. Alternatively, open `fig_2.qmd` in RStudio and select **Render**.
+
+### Representative demo
+
+Rendering Figure 2 from `fig_2.qmd` uses only one small deposited input, `data/raw/01_proteomics_metabolomics/OlinkPreprocessed.RData` (approximately 1.3 MB), and does not require the large archives containing single-cell or flow cytometry data.
+
+Expected Figure 2 panel outputs include:
+
+- `fig_2_files/figure_02a_pairwise_protein_differential_expression_heatmap.png`
+- `fig_2_files/figure_02b_protein_gsea_pathway_enrichment_heatmap.png`
+- `fig_2_files/figure_02c_differential_protein_zscore_heatmap.png`
+- `fig_2_files/figure_02d_angiopoietin_longitudinal_boxplots.png`
+- `fig_2_files/figure_02e_protein_clinical_correlation_edge_bundle.png`
+
+Typical demo runtime is under 20 minutes.
+
+## License and versioning
+
+The code in this repository is licensed under the [MIT License](LICENSE). The accompanying Zenodo dataset is licensed separately under CC BY 4.0.
 
 ## Citation
 
