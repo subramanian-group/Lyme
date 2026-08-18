@@ -132,7 +132,8 @@ No standalone software package was developed for this study. To reproduce the an
 
    Download and extraction of the Zenodo archives takes approximately 30 minutes on a 1-Gbps connection.
 
-5. From a system terminal opened in the repository root, run:
+5. To render a figure, from a system terminal opened in the repository root, run the
+corresponding .qmd file. For example, to render Figure 2, run:
 
    ```text
    quarto render fig_2.qmd
